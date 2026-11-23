@@ -1,0 +1,17 @@
+{
+  "sera-forensic-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/matt/.gemini/antigravity/scratch/sera/.venv/bin/python\" -B ./hooks/pre_tool_guard.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

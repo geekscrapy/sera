@@ -1,0 +1,11 @@
+{
+  "name": "sera",
+  "displayName": "SERA \u2014 Secure Extraction for Response Agents",
+  "version": "0.1.0",
+  "description": "Forensic-grade DFIR log extraction engine: downloads full unsummarized events via allowlisted query templates into BigQuery or custom sinks with cryptographic spool verification.",
+  "suggestedPrompts": [
+    "What does SERA do and how do I set it up for this engagement?",
+    "Submit a SERA extraction job for Entra signIns and Purview UAL over the last 7 days",
+    "Check progress and uploaded event counts for active SERA jobs"
+  ]
+}
