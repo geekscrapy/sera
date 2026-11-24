@@ -1,4 +1,4 @@
-"""End-to-end parity tests proving identical workflows across `sera` CLI and `MCPServer`, plus zero cross-case overlap."""
+"""End-to-end parity tests proving 1-to-1 workflows across `sera` CLI and `MCPServer`, plus zero cross-case overlap."""
 
 from __future__ import annotations
 
@@ -93,20 +93,41 @@ async def test_cli_and_mcp_full_parity_and_multi_engagement_isolation(tmp_path: 
     )
 
     mcp_server, pool = create_mcp_server()
+
+    # Verify MCP tool names match CLI runtime commands 1-to-1
+    registered_tools = sorted(t.name for t in await mcp_server.list_tools())
+    assert registered_tools == [
+        "collect",
+        "destinations",
+        "jobs",
+        "resume",
+        "sources",
+        "status",
+        "templates",
+    ]
+
     cli_sources = json.loads(
         runner.invoke(app, ["sources", "--workspace", str(case_alpha), "--json"]).stdout
     )
     mcp_sources = _extract_mcp_json(
-        await mcp_server.call_tool("list_sources", {"workspace_dir": str(case_alpha)})
+        await mcp_server.call_tool("sources", {"workspace_dir": str(case_alpha)})
     )
     assert cli_sources == mcp_sources
     assert mcp_sources["microsoft"]["profiles"][0]["tenant_id"] == "tenant-alpha"  # type: ignore[index]
+
+    cli_dests = json.loads(
+        runner.invoke(app, ["destinations", "--workspace", str(case_alpha), "--json"]).stdout
+    )
+    mcp_dests = _extract_mcp_json(
+        await mcp_server.call_tool("destinations", {"workspace_dir": str(case_alpha)})
+    )
+    assert cli_dests == mcp_dests
 
     cli_templates = json.loads(
         runner.invoke(app, ["templates", "--sub-source", "entra", "--workspace", str(case_alpha), "--json"]).stdout
     )
     mcp_templates = _extract_mcp_json(
-        await mcp_server.call_tool("list_templates", {"sub_source": "entra", "workspace_dir": str(case_alpha)})
+        await mcp_server.call_tool("templates", {"sub_source": "entra", "workspace_dir": str(case_alpha)})
     )
     assert cli_templates == mcp_templates
 
@@ -147,32 +168,43 @@ async def test_cli_and_mcp_full_parity_and_multi_engagement_isolation(tmp_path: 
         assert cli_collect.exit_code == 0, cli_collect.output
         assert json.loads(cli_collect.stdout)["events_uploaded"] == 1
 
-        submit_res = _extract_mcp_json(
+        collect_res = _extract_mcp_json(
             await mcp_server.call_tool(
-                "submit_job",
+                "collect",
                 {
                     "source": "microsoft",
                     "sub_source": "entra",
-                    "table_or_endpoint": "signIns",
-                    "start_time": "2026-11-20T00:00:00Z",
-                    "end_time": "2026-11-21T00:00:00Z",
+                    "target": "signIns",
+                    "start": "2026-11-20T00:00:00Z",
+                    "end": "2026-11-21T00:00:00Z",
                     "workspace_dir": str(case_beta),
                 },
             )
         )
-        assert isinstance(submit_res, dict)
-        beta_job_id = submit_res["job_id"]
+        assert isinstance(collect_res, dict)
+        beta_job_id = collect_res["job_id"]
         await pool.get(case_beta).wait_all_background_tasks()
+
+        beta_jobs = _extract_mcp_json(
+            await mcp_server.call_tool(
+                "jobs",
+                {"workspace_dir": str(case_beta)},
+            )
+        )
+        assert isinstance(beta_jobs, dict)
+        assert beta_jobs["total_uploaded_events_in_workspace"] == 1
+        assert beta_jobs["jobs"][0]["job_id"] == beta_job_id
 
         beta_status = _extract_mcp_json(
             await mcp_server.call_tool(
-                "check_jobs",
-                {"job_id": beta_job_id, "workspace_dir": str(case_beta)},
+                "status",
+                {"job_id": beta_job_id, "slices": True, "workspace_dir": str(case_beta)},
             )
         )
         assert isinstance(beta_status, dict)
         assert beta_status["status"] == "completed"
         assert beta_status["events_uploaded"] == 1
+        assert len(beta_status["slice_details"]) == 1
 
     alpha_files = list((sink_alpha / "events").rglob("*.jsonl"))
     beta_files = list((sink_beta / "events").rglob("*.jsonl"))

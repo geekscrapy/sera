@@ -82,9 +82,6 @@ def initialize_workspace(
     destination_name: str = "default",
     destination_options: dict[str, Any] | None = None,
     source_defaults: dict[str, dict[str, Any]] | None = None,
-    proxy_url: str = "",
-    ca_bundle: str = "",
-    verify_tls: bool = True,
     batch_size: int = 5000,
     sync_uv_deps: bool = True,
     source_registry: SourceRegistry | None = None,
@@ -106,13 +103,9 @@ def initialize_workspace(
         type=destination_type,
         options=normalized_opts,
     )
-    net_cfg = NetworkConfig(
-        proxy_url=proxy_url.strip(),
-        ca_bundle=ca_bundle.strip(),
-        verify_tls=verify_tls,
-    )
+    net_cfg = NetworkConfig()
     # Validate options via the destination plugin before persisting config.toml
-    dst_reg.create(dest_cfg, net_cfg)
+    dst_reg.create(dest_cfg)
 
     cfg = WorkspaceConfig(
         default_destination=destination_name,
@@ -181,7 +174,7 @@ class SeraService:
         if self._sink_override is not None:
             return self._sink_override
         dest_cfg = self.config.get_destination(destination_name)
-        return self.destinations.create(dest_cfg, self.config.network)
+        return self.destinations.create(dest_cfg)
 
     def configure_source_auth(
         self,
@@ -234,7 +227,7 @@ class SeraService:
         self.reload_config()
         configured: dict[str, Any] = {}
         for name, dcfg in self.config.destinations.items():
-            sink = self.destinations.create(dcfg, self.config.network)
+            sink = self.destinations.create(dcfg)
             configured[name] = sink.config_summary()
         return {
             "default_destination": self.config.default_destination,

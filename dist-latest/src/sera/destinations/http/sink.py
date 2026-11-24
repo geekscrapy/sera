@@ -27,8 +27,8 @@ class HttpIngestDestination(BaseDestinationSink):
             SinkOptionSpec("jobs_url", "Optional URL to POST job completion manifests", required=False, default=""),
         )
 
-    def __init__(self, dest_config: DestinationConfig, network: NetworkConfig) -> None:
-        super().__init__(dest_config, network)
+    def __init__(self, dest_config: DestinationConfig) -> None:
+        super().__init__(dest_config)
         opts = self.apply_defaults(dest_config.options)
         self.url = str(opts.get("url", "")).strip()
         if not self.url:
@@ -74,7 +74,7 @@ class HttpIngestDestination(BaseDestinationSink):
         if not ndjson_bytes or event_count <= 0:
             return
         headers = self._headers()
-        async with SeraHttpClient(self.network) as http:
+        async with SeraHttpClient(NetworkConfig()) as http:
             assert http._client is not None
             if self.payload_format == "ndjson":
                 headers["Content-Type"] = "application/x-ndjson"
@@ -110,7 +110,7 @@ class HttpIngestDestination(BaseDestinationSink):
         summary_url = str(self.dest_config.options.get("jobs_url", "")).strip()
         if not summary_url:
             return
-        async with SeraHttpClient(self.network) as http:
+        async with SeraHttpClient(NetworkConfig()) as http:
             await http.request_json(
                 "POST",
                 summary_url,

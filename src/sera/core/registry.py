@@ -15,7 +15,7 @@ from typing import Type
 
 import sera.destinations as destinations_pkg
 import sera.sources as sources_pkg
-from sera.config import DestinationConfig, NetworkConfig, WorkspaceConfig
+from sera.config import DestinationConfig, WorkspaceConfig
 from sera.destinations.base import BaseDestinationSink
 from sera.sources.base import BaseSourceConnector
 
@@ -103,14 +103,14 @@ class DestinationRegistry:
             raise KeyError(f"Unknown destination plugin '{sink_type}'. Registered types: {available}")
         return self._sinks[sink_type]
 
-    def create(self, dest_config: DestinationConfig, network: NetworkConfig) -> BaseDestinationSink:
+    def create(self, dest_config: DestinationConfig) -> BaseDestinationSink:
         cls = self.get_class(dest_config.type)
         normalized_cfg = DestinationConfig(
             name=dest_config.name,
             type=dest_config.type,
             options=cls.apply_defaults(dest_config.options),
         )
-        return cls(dest_config=normalized_cfg, network=network)
+        return cls(dest_config=normalized_cfg)
 
     def required_packages(self) -> list[str]:
         pkgs: set[str] = set()

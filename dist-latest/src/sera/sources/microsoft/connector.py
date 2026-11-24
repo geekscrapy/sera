@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from sera.config import WorkspaceConfig
+from sera.config import NetworkConfig, WorkspaceConfig
 from sera.core.http_client import SeraHttpClient
 from sera.core.models import JobSpec, SliceResult
 from sera.core.template_primitives import TemplateValidationError, validate_table_ident
@@ -20,6 +20,21 @@ from sera.sources.microsoft.log_analytics import fetch_log_analytics_slice
 from sera.sources.microsoft.purview_ual import fetch_purview_ual_slice, validate_purview_endpoint
 from sera.sources.microsoft.templates import MicrosoftTemplateEngine, validate_machine_id
 
+
+_MS_PROXY_FIELDS: tuple[AuthFieldSpec, ...] = (
+    AuthFieldSpec(
+        "proxy_url",
+        "Optional HTTP/HTTPS/SOCKS5 proxy URL scoped strictly to Microsoft endpoints",
+        required=False,
+        default="",
+    ),
+    AuthFieldSpec(
+        "ca_bundle",
+        "Optional custom CA certificate PEM path for Microsoft proxy",
+        required=False,
+        default="",
+    ),
+)
 
 SUB_SOURCE_SPECS: dict[str, dict[str, Any]] = {
     "entra": {
@@ -71,8 +86,18 @@ class MicrosoftSourceConnector(BaseSourceConnector):
 
     def __init__(self, workspace_dir: Path, config: WorkspaceConfig) -> None:
         super().__init__(workspace_dir, config)
-        self.auth = MicrosoftAuthManager(workspace_dir=workspace_dir, network=config.network)
+        ms_defaults = config.source_defaults.get("microsoft", {})
+        self.auth = MicrosoftAuthManager(
+            workspace_dir=workspace_dir,
+            network=config.network,
+            default_proxy_url=str(ms_defaults.get("proxy_url", "")),
+            default_ca_bundle=str(ms_defaults.get("ca_bundle", "")),
+        )
         self.templates = MicrosoftTemplateEngine()
+
+    def source_network(self, profile: str = "default") -> NetworkConfig:
+        """Return Microsoft-scoped proxy and TLS settings for `profile` (never touches BigQuery/destinations)."""
+        return self.auth.effective_network(profile)
 
     @classmethod
     def auth_modes(cls) -> dict[str, AuthModeSpec]:
@@ -84,6 +109,7 @@ class MicrosoftSourceConnector(BaseSourceConnector):
                     AuthFieldSpec("tenant_id", "Microsoft Entra Tenant ID", required=True),
                     AuthFieldSpec("client_id", "App Registration Client ID", required=True),
                     AuthFieldSpec("client_secret", "App Registration Client Secret", required=True, secret=True),
+                    *_MS_PROXY_FIELDS,
                 ),
             ),
             "cert": AuthModeSpec(
@@ -95,6 +121,7 @@ class MicrosoftSourceConnector(BaseSourceConnector):
                     AuthFieldSpec("private_key_path", "PEM private key file path", required=True),
                     AuthFieldSpec("thumbprint", "SHA-1 certificate thumbprint (optional if public_certificate_path set)", required=False),
                     AuthFieldSpec("public_certificate_path", "Optional public PEM certificate file path", required=False),
+                    *_MS_PROXY_FIELDS,
                 ),
             ),
             "device-code": AuthModeSpec(
@@ -108,6 +135,7 @@ class MicrosoftSourceConnector(BaseSourceConnector):
                         required=False,
                         default=DEFAULT_GRAPH_POWERSHELL_CLIENT_ID,
                     ),
+                    *_MS_PROXY_FIELDS,
                 ),
             ),
             "browser": AuthModeSpec(
@@ -121,6 +149,7 @@ class MicrosoftSourceConnector(BaseSourceConnector):
                         required=False,
                         default=DEFAULT_GRAPH_POWERSHELL_CLIENT_ID,
                     ),
+                    *_MS_PROXY_FIELDS,
                 ),
             ),
             "portal-session": AuthModeSpec(
@@ -131,6 +160,7 @@ class MicrosoftSourceConnector(BaseSourceConnector):
                     AuthFieldSpec("xsrf_token", "MDE Portal X-XSRF-TOKEN header", required=True, secret=True),
                     AuthFieldSpec("tenant_id", "Optional tenant-id header", required=False, default=""),
                     AuthFieldSpec("base_url", "Portal base URL", required=False, default="https://security.microsoft.com"),
+                    *_MS_PROXY_FIELDS,
                 ),
             ),
             "static-bearer": AuthModeSpec(
@@ -139,9 +169,20 @@ class MicrosoftSourceConnector(BaseSourceConnector):
                 fields=(
                     AuthFieldSpec("access_token", "Bearer access token", required=True, secret=True),
                     AuthFieldSpec("tenant_id", "Optional tenant identifier", required=False, default=""),
+                    *_MS_PROXY_FIELDS,
                 ),
             ),
         }
+
+    @staticmethod
+    def _attach_proxy_fields(profile_data: dict[str, Any], values: dict[str, str]) -> dict[str, Any]:
+        proxy_url = values.get("proxy_url", "").strip()
+        ca_bundle = values.get("ca_bundle", "").strip()
+        if proxy_url:
+            profile_data["proxy_url"] = proxy_url
+        if ca_bundle:
+            profile_data["ca_bundle"] = ca_bundle
+        return profile_data
 
     def configure_auth(
         self,
@@ -159,12 +200,15 @@ class MicrosoftSourceConnector(BaseSourceConnector):
             cid = values["client_id"].strip()
             path = self.auth.save_profile(
                 profile,
-                {
-                    "auth_mode": "service_principal_secret",
-                    "tenant_id": tid,
-                    "client_id": cid,
-                    "client_secret": values["client_secret"].strip(),
-                },
+                self._attach_proxy_fields(
+                    {
+                        "auth_mode": "service_principal_secret",
+                        "tenant_id": tid,
+                        "client_id": cid,
+                        "client_secret": values["client_secret"].strip(),
+                    },
+                    values,
+                ),
             )
             return {"profile": profile, "auth_mode": "service_principal_secret", "tenant_id": tid, "client_id": cid, "path": str(path)}
 
@@ -173,40 +217,59 @@ class MicrosoftSourceConnector(BaseSourceConnector):
             cid = values["client_id"].strip()
             path = self.auth.save_profile(
                 profile,
-                {
-                    "auth_mode": "service_principal_cert",
-                    "tenant_id": tid,
-                    "client_id": cid,
-                    "private_key_path": values["private_key_path"].strip(),
-                    "thumbprint": values.get("thumbprint", "").strip(),
-                    "public_certificate_path": values.get("public_certificate_path", "").strip(),
-                },
+                self._attach_proxy_fields(
+                    {
+                        "auth_mode": "service_principal_cert",
+                        "tenant_id": tid,
+                        "client_id": cid,
+                        "private_key_path": values["private_key_path"].strip(),
+                        "thumbprint": values.get("thumbprint", "").strip(),
+                        "public_certificate_path": values.get("public_certificate_path", "").strip(),
+                    },
+                    values,
+                ),
             )
             return {"profile": profile, "auth_mode": "service_principal_cert", "tenant_id": tid, "client_id": cid, "path": str(path)}
 
         if mode == "device-code":
             tid = values["tenant_id"].strip()
             cid = values.get("client_id", "").strip() or DEFAULT_GRAPH_POWERSHELL_CLIENT_ID
-            res = self.auth.interactive_device_code_login(profile=profile, tenant_id=tid, client_id=cid, on_prompt=on_message)
+            res = self.auth.interactive_device_code_login(
+                profile=profile,
+                tenant_id=tid,
+                client_id=cid,
+                on_prompt=on_message,
+                proxy_url=values.get("proxy_url", ""),
+                ca_bundle=values.get("ca_bundle", ""),
+            )
             return {**res, "client_id": cid}
 
         if mode == "browser":
             tid = values["tenant_id"].strip()
             cid = values.get("client_id", "").strip() or DEFAULT_GRAPH_POWERSHELL_CLIENT_ID
-            res = self.auth.interactive_browser_login(profile=profile, tenant_id=tid, client_id=cid)
+            res = self.auth.interactive_browser_login(
+                profile=profile,
+                tenant_id=tid,
+                client_id=cid,
+                proxy_url=values.get("proxy_url", ""),
+                ca_bundle=values.get("ca_bundle", ""),
+            )
             return {**res, "client_id": cid}
 
         if mode == "portal-session":
             tid = values.get("tenant_id", "").strip()
             path = self.auth.save_profile(
                 profile,
-                {
-                    "auth_mode": "portal_session",
-                    "tenant_id": tid,
-                    "cookie": values["cookie"].strip(),
-                    "xsrf_token": values["xsrf_token"].strip(),
-                    "base_url": values.get("base_url", "").strip() or "https://security.microsoft.com",
-                },
+                self._attach_proxy_fields(
+                    {
+                        "auth_mode": "portal_session",
+                        "tenant_id": tid,
+                        "cookie": values["cookie"].strip(),
+                        "xsrf_token": values["xsrf_token"].strip(),
+                        "base_url": values.get("base_url", "").strip() or "https://security.microsoft.com",
+                    },
+                    values,
+                ),
             )
             return {"profile": profile, "auth_mode": "portal_session", "tenant_id": tid, "client_id": "", "path": str(path)}
 
@@ -214,11 +277,14 @@ class MicrosoftSourceConnector(BaseSourceConnector):
         tid = values.get("tenant_id", "").strip()
         path = self.auth.save_profile(
             profile,
-            {
-                "auth_mode": "static_bearer",
-                "tenant_id": tid,
-                "access_token": values["access_token"].strip(),
-            },
+            self._attach_proxy_fields(
+                {
+                    "auth_mode": "static_bearer",
+                    "tenant_id": tid,
+                    "access_token": values["access_token"].strip(),
+                },
+                values,
+            ),
         )
         return {"profile": profile, "auth_mode": "static_bearer", "tenant_id": tid, "client_id": "", "path": str(path)}
 

@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from sera.config import DestinationConfig, NetworkConfig
+from sera.config import DestinationConfig
 from sera.core.models import JobRecord, utc_now_iso
 from sera.destinations.base import BaseDestinationSink, SinkOptionSpec
 
@@ -31,8 +31,8 @@ class JsonlDirectoryDestination(BaseDestinationSink):
             ),
         )
 
-    def __init__(self, dest_config: DestinationConfig, network: NetworkConfig) -> None:
-        super().__init__(dest_config, network)
+    def __init__(self, dest_config: DestinationConfig) -> None:
+        super().__init__(dest_config)
         opts = self.apply_defaults(dest_config.options)
         raw_dir = str(opts.get("output_dir", "")).strip()
         if not raw_dir:

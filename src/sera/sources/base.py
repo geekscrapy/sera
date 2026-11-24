@@ -10,10 +10,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import inspect
 from pathlib import Path
 from typing import Any, Callable
 
-from sera.config import WorkspaceConfig
+from sera.config import NetworkConfig, WorkspaceConfig
 from sera.core.http_client import SeraHttpClient
 from sera.core.models import JobSpec, SliceResult
 
@@ -47,6 +48,18 @@ class BaseSourceConnector(ABC):
     def __init__(self, workspace_dir: Path, config: WorkspaceConfig) -> None:
         self.workspace_dir = workspace_dir
         self.config = config
+
+    def source_network(self, profile: str = "default") -> NetworkConfig:
+        """Return HTTP client network settings for this source plugin (proxy is source-scoped, never destination-scoped)."""
+        return self.config.network
+
+    @classmethod
+    def skill_resource_markdown(cls) -> str:
+        """Return source-specific Markdown reference packaged into `skills/sera/resources/sources/`."""
+        res_file = Path(inspect.getfile(cls)).resolve().parent / "SKILL_RESOURCE.md"
+        if res_file.is_file():
+            return res_file.read_text(encoding="utf-8")
+        return f"# Source Plugin: `{cls.source_name}`\n"
 
     @classmethod
     @abstractmethod

@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from google.cloud import bigquery
 
-from sera.config import DestinationConfig, NetworkConfig
+from sera.config import DestinationConfig
 from sera.core.models import JobRecord, utc_now_iso
 from sera.destinations.base import BaseDestinationSink, SinkOptionSpec
 
@@ -76,10 +76,9 @@ class BigQueryDestination(BaseDestinationSink):
     def __init__(
         self,
         dest_config: DestinationConfig,
-        network: NetworkConfig,
         client_factory: Callable[[], bigquery.Client] | None = None,
     ) -> None:
-        super().__init__(dest_config, network)
+        super().__init__(dest_config)
         opts = self.apply_defaults(dest_config.options)
         self.dataset_id = str(opts.get("dataset_id", "sera")).strip()
         self.events_table = str(opts.get("events_table", "events")).strip()

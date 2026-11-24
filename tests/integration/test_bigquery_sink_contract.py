@@ -8,7 +8,7 @@ import os
 import pytest
 from google.cloud import bigquery
 
-from sera.config import DestinationConfig, NetworkConfig
+from sera.config import DestinationConfig
 from sera.core.models import JobRecord, JobStatus, RawEventEnvelope, canonical_raw_json, sha256_hex, utc_now_iso
 from sera.destinations.bigquery import BigQueryDestination, EVENTS_SCHEMA, JOBS_SCHEMA
 
@@ -56,7 +56,6 @@ async def test_live_bigquery_batch_load_roundtrip_contract() -> None:
             type="bigquery",
             options={"dataset_id": dataset_id},
         ),
-        NetworkConfig(),
     )
     payload = {"id": "itest-1", "diagnostic": True}
     raw_str, raw_hash = canonical_raw_json(payload)

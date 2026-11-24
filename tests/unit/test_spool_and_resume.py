@@ -87,7 +87,7 @@ class _FlakySink(BaseDestinationSink):
         return ()
 
     def __init__(self, fail_on_call: int | None = None) -> None:
-        super().__init__(DestinationConfig(name="mem", type="memory_flaky"), NetworkConfig(max_retries=0))
+        super().__init__(DestinationConfig(name="mem", type="memory_flaky"))
         self.fail_on_call = fail_on_call
         self.calls = 0
         self.uploaded_lines: list[str] = []

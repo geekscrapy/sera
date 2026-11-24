@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import inspect
+from pathlib import Path
 from typing import Any
 
-from sera.config import DestinationConfig, NetworkConfig
+from sera.config import DestinationConfig
 from sera.core.models import JobRecord
 
 
@@ -32,9 +34,16 @@ class BaseDestinationSink(ABC):
     sink_type: str = ""
     required_packages: tuple[str, ...] = ()
 
-    def __init__(self, dest_config: DestinationConfig, network: NetworkConfig) -> None:
+    def __init__(self, dest_config: DestinationConfig) -> None:
         self.dest_config = dest_config
-        self.network = network
+
+    @classmethod
+    def skill_resource_markdown(cls) -> str:
+        """Return sink-specific Markdown reference packaged into `skills/sera/resources/destinations/`."""
+        res_file = Path(inspect.getfile(cls)).resolve().parent / "SKILL_RESOURCE.md"
+        if res_file.is_file():
+            return res_file.read_text(encoding="utf-8")
+        return f"# Destination Plugin: `{cls.sink_type}`\n"
 
     @classmethod
     @abstractmethod

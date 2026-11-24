@@ -45,13 +45,13 @@ def test_hook_blocks_all_dot_sera_access_and_injects_verified_workspace_for_mcp(
     mcp_bound = evaluate_pre_tool_use(
         {
             "workspacePaths": ["/cases/client_alpha"],
-            "toolCall": {"name": "mcp_sera_sera_submit_job", "args": {"source": "microsoft", "workspace_dir": "/spoofed"}},
+            "toolCall": {"name": "mcp_sera_sera_collect", "args": {"source": "microsoft", "workspace_dir": "/spoofed"}},
         }
     )
     assert mcp_bound == {"decision": "allow", "overwrite": {"workspace_dir": "/cases/client_alpha"}}
 
 
-def test_plugin_packager_produces_self_contained_local_uvx_plugin(tmp_path: Path) -> None:
+def test_plugin_packager_produces_self_contained_local_uvx_plugin_and_skill_resources(tmp_path: Path) -> None:
     fake_git = tmp_path / "git"
     (fake_git / "src").mkdir(parents=True)
     result = build_plugin_release(fake_git, version="0.1.0")
@@ -125,6 +125,20 @@ def test_plugin_packager_produces_self_contained_local_uvx_plugin(tmp_path: Path
     assert "Uploading" in skill_text
     assert "Agent-Only Technical Reference" in skill_text
 
+    # Verify SKILL.md holds zero vendor/sink specifics and delegates to skills/sera/resources/
+    for vendor_specific_term in ("purview_ual", "defender_hunting", "AuditLogsQuery", "dataset_id", "collection_jobs"):
+        assert vendor_specific_term not in skill_text
+    assert "./resources/sources/microsoft.md" in skill_text
+    assert "./resources/destinations/bigquery.md" in skill_text
+
+    ms_res = (dist_latest / "skills" / "sera" / "resources" / "sources" / "microsoft.md").read_text(encoding="utf-8")
+    bq_res = (dist_latest / "skills" / "sera" / "resources" / "destinations" / "bigquery.md").read_text(encoding="utf-8")
+    assert "purview_ual" in ms_res
+    assert "defender_timeline" in ms_res
+    assert "dataset_id" in bq_res
+    assert (dist_latest / "skills" / "sera" / "resources" / "destinations" / "jsonl.md").is_file()
+    assert (dist_latest / "skills" / "sera" / "resources" / "destinations" / "http.md").is_file()
+
     # Execute standalone packaged hook script over subprocess stdin/stdout
     hook_script = dist_latest / "hooks" / "pre_tool_guard.py"
     proc = subprocess.run(
@@ -136,7 +150,7 @@ def test_plugin_packager_produces_self_contained_local_uvx_plugin(tmp_path: Path
     )
     assert json.loads(proc.stdout)["decision"] == "deny"
 
-    # Verify zip contents include local scripts, pyproject.toml, and bundled src/sera
+    # Verify zip contents include local scripts, pyproject.toml, bundled src/sera, and skill resources/
     with zipfile.ZipFile(zip_path, "r") as zf:
         names = set(zf.namelist())
     assert "sera/plugin.json" in names
@@ -149,3 +163,7 @@ def test_plugin_packager_produces_self_contained_local_uvx_plugin(tmp_path: Path
     assert "sera/hooks/pre_tool_guard.py" in names
     assert "sera/rules/sera.md" in names
     assert "sera/skills/sera/SKILL.md" in names
+    assert "sera/skills/sera/resources/sources/microsoft.md" in names
+    assert "sera/skills/sera/resources/destinations/bigquery.md" in names
+    assert "sera/skills/sera/resources/destinations/jsonl.md" in names
+    assert "sera/skills/sera/resources/destinations/http.md" in names

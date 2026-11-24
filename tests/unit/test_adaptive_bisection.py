@@ -88,7 +88,7 @@ async def test_only_high_volume_day_splits_while_other_six_days_stay_24h(tmp_pat
     db = SeraDatabase(tmp_path / "ws" / ".sera" / "sera.sqlite")
     spool = EphemeralSpoolManager(tmp_path / "ws" / ".sera" / "spool")
     conn = _TuesdaySpikeConnector(tmp_path / "ws", cfg)
-    sink = JsonlDirectoryDestination(dest_cfg, cfg.network)
+    sink = JsonlDirectoryDestination(dest_cfg)
 
     engine = CollectionEngine(cfg, db, spool)
     spec = JobSpec(

@@ -88,10 +88,8 @@ def cmd_init(
     source_default: Optional[list[str]] = typer.Option(
         None,
         "--source-default",
-        help="Optional source default as SOURCE.KEY=VALUE (e.g. microsoft.default_workspace_id=...)",
+        help="Optional source default as SOURCE.KEY=VALUE (e.g. microsoft.default_workspace_id=..., microsoft.proxy_url=...)",
     ),
-    proxy: str = typer.Option("", "--proxy", help="Optional HTTP/HTTPS/SOCKS5 proxy URL"),
-    ca_bundle: str = typer.Option("", "--ca-bundle", help="Optional custom CA certificate PEM path"),
     skip_uv: bool = typer.Option(False, "--skip-uv", help="Skip upfront `uv pip install` sync"),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
 ) -> None:
@@ -133,8 +131,6 @@ def cmd_init(
         destination_name=dest_name.strip(),
         destination_options=opts,
         source_defaults=src_defaults_map,
-        proxy_url=proxy,
-        ca_bundle=ca_bundle,
         sync_uv_deps=not skip_uv,
         source_registry=src_reg,
         destination_registry=dst_reg,
@@ -212,7 +208,7 @@ def cmd_dest_add(
     )
     if set_default:
         cfg.default_destination = name
-    sink = svc.destinations.create(cfg.destinations[name], cfg.network)
+    sink = svc.destinations.create(cfg.destinations[name])
     save_workspace_config(ws, cfg)
     console.print(
         f"[green]Saved destination '[bold]{name}[/bold]' ({dest_type}) -> {sink.describe_target()}[/green]"
@@ -238,7 +234,7 @@ def cmd_destinations(
     workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """List configured destinations and target coordinates (mirrors MCP `list_destinations`)."""
+    """List configured destinations and target coordinates (mirrors MCP `destinations`)."""
     svc = SeraService(_ws(workspace))
     info = svc.list_destinations()
     if as_json:
@@ -387,7 +383,7 @@ def cmd_sources(
     workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """List discovered source plugins, supported `sub_source`s, and readiness (mirrors MCP `list_sources`)."""
+    """List discovered source plugins, supported `sub_source`s, and readiness (mirrors MCP `sources`)."""
     svc = SeraService(_ws(workspace))
     data = svc.list_sources()
     if as_json:
@@ -417,7 +413,7 @@ def cmd_templates(
     workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """List canonical full-event templates from discovered source plugins (mirrors MCP `list_templates`)."""
+    """List canonical full-event templates from discovered source plugins (mirrors MCP `templates`)."""
     svc = SeraService(_ws(workspace))
     items = svc.list_templates(source=source.strip(), sub_source=sub_source.strip())
     if as_json:
@@ -527,7 +523,7 @@ def cmd_jobs(
     workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Check recent extraction jobs and uploaded event totals (mirrors MCP `check_jobs`)."""
+    """Check recent extraction jobs and uploaded event totals (mirrors MCP `jobs`)."""
     svc = SeraService(_ws(workspace))
     data = svc.check_jobs(limit=limit)
     if as_json:
@@ -561,12 +557,12 @@ def cmd_jobs(
 
 @app.command("status")
 def cmd_status(
-    job_id: str = typer.Argument(..., help="Job ID returned by collect / submit_job"),
+    job_id: str = typer.Argument(..., help="Job ID returned by collect"),
     slices: bool = typer.Option(False, "--slices", help="Include per-slice interval breakdown"),
     workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Inspect detailed progress or final summary for a single `job_id` (mirrors MCP `check_jobs(job_id)`)."""
+    """Inspect detailed progress or final summary for a single `job_id` (mirrors MCP `status`)."""
     svc = SeraService(_ws(workspace))
     summary = svc.check_jobs(job_id=job_id, include_slices=slices)
     if as_json:
@@ -583,7 +579,7 @@ def cmd_resume(
     workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Resume uncommitted slices of an interrupted/failed job (mirrors MCP `resume_job`)."""
+    """Resume uncommitted slices of an interrupted/failed job (mirrors MCP `resume`)."""
     ws = _ws(workspace)
     svc = SeraService(ws)
     rec = svc.prepare_resume(job_id)

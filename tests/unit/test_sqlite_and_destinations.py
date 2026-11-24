@@ -10,7 +10,8 @@ from typing import Any
 import httpx
 import respx
 
-from sera.config import DestinationConfig, NetworkConfig
+from sera.config import DestinationConfig, WorkspaceConfig
+from sera.sources.microsoft.connector import MicrosoftSourceConnector
 from sera.core.db import SeraDatabase
 from sera.core.models import JobRecord, JobStatus, RawEventEnvelope, canonical_raw_json, sha256_hex, utc_now_iso
 from sera.destinations.bigquery import BigQueryDestination
@@ -115,7 +116,8 @@ async def test_customizable_bigquery_jsonl_and_http_destinations(tmp_path: Path)
             "cluster_fields": ["source", "sub_source"],
         },
     )
-    bq_sink = BigQueryDestination(bq_cfg, NetworkConfig(), client_factory=lambda: fake_bq)
+    bq_sink = BigQueryDestination(bq_cfg, client_factory=lambda: fake_bq)
+    assert not hasattr(bq_sink, "network")
     assert bq_sink.describe_target() == "adc-env-project.forensics.raw_events"
     await bq_sink.upload_ndjson_batch(ndjson_bytes, 1, job, "slice_1")
     await bq_sink.record_job_summary(job)
@@ -123,10 +125,17 @@ async def test_customizable_bigquery_jsonl_and_http_destinations(tmp_path: Path)
     assert fake_bq.loads[0][0] == "adc-env-project.forensics.raw_events"
     assert fake_bq.loads[1][0] == "adc-env-project.forensics.audit_runs"
 
+    # Verify proxy settings live strictly on Microsoft source profiles/defaults and never touch BigQuery
+    ms_ws_cfg = WorkspaceConfig(source_defaults={"microsoft": {"proxy_url": "socks5://127.0.0.1:1080"}})
+    ms_conn = MicrosoftSourceConnector(tmp_path / "ms_ws", ms_ws_cfg)
+    assert ms_conn.source_network("default").proxy_url == "socks5://127.0.0.1:1080"
+    ms_conn.configure_auth("corp", "static-bearer", {"access_token": "tok", "proxy_url": "http://127.0.0.1:8888"})
+    assert ms_conn.source_network("corp").proxy_url == "http://127.0.0.1:8888"
+
     # 2. Customizable JSONL directory destination
     jsonl_dir = tmp_path / "mounted_case_share"
     j_cfg = DestinationConfig(name="share", type="jsonl", options={"output_dir": str(jsonl_dir)})
-    j_sink = JsonlDirectoryDestination(j_cfg, NetworkConfig())
+    j_sink = JsonlDirectoryDestination(j_cfg)
     await j_sink.upload_ndjson_batch(ndjson_bytes, 1, job, "slice_1")
     await j_sink.record_job_summary(job)
     written_files = list((jsonl_dir / "events").rglob("*.jsonl"))
@@ -148,7 +157,7 @@ async def test_customizable_bigquery_jsonl_and_http_destinations(tmp_path: Path)
                 "hec_token": "tok-123",
             },
         )
-        h_sink = HttpIngestDestination(h_cfg, NetworkConfig())
+        h_sink = HttpIngestDestination(h_cfg)
         await h_sink.upload_ndjson_batch(ndjson_bytes, 1, job, "slice_1")
         assert hec_route.called
         sent_auth = hec_route.calls[0].request.headers["Authorization"]

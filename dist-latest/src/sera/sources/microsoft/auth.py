@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -43,11 +44,19 @@ def _build_requests_session(network: NetworkConfig) -> requests.Session:
 
 
 class MicrosoftAuthManager:
-    """Manages isolated per-engagement Microsoft credentials in `<workspace>/.sera/creds/`."""
+    """Manages isolated per-engagement Microsoft credentials and Microsoft-scoped proxy settings in `<workspace>/.sera/creds/`."""
 
-    def __init__(self, workspace_dir: Path, network: NetworkConfig) -> None:
+    def __init__(
+        self,
+        workspace_dir: Path,
+        network: NetworkConfig,
+        default_proxy_url: str = "",
+        default_ca_bundle: str = "",
+    ) -> None:
         self.workspace_dir = workspace_dir
         self.network = network
+        self.default_proxy_url = default_proxy_url.strip()
+        self.default_ca_bundle = default_ca_bundle.strip()
 
     def load_profile(self, profile: str = "default") -> dict[str, Any]:
         path = creds_path_for_profile(self.workspace_dir, profile)
@@ -64,6 +73,28 @@ class MicrosoftAuthManager:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return path
 
+    def effective_network(
+        self,
+        profile: str = "default",
+        *,
+        override_proxy_url: str = "",
+        override_ca_bundle: str = "",
+    ) -> NetworkConfig:
+        """Resolve Microsoft-specific proxy and CA bundle settings without affecting destinations like BigQuery."""
+        prof_proxy = ""
+        prof_ca = ""
+        path = creds_path_for_profile(self.workspace_dir, profile)
+        if path.exists():
+            try:
+                pdata = json.loads(path.read_text(encoding="utf-8"))
+                prof_proxy = str(pdata.get("proxy_url", "")).strip()
+                prof_ca = str(pdata.get("ca_bundle", "")).strip()
+            except Exception:
+                pass
+        proxy = override_proxy_url.strip() or prof_proxy or self.default_proxy_url or self.network.proxy_url
+        ca = override_ca_bundle.strip() or prof_ca or self.default_ca_bundle or self.network.ca_bundle
+        return replace(self.network, proxy_url=proxy, ca_bundle=ca)
+
     def check_status(self, profile: str = "default") -> dict[str, Any]:
         path = creds_path_for_profile(self.workspace_dir, profile)
         if not path.exists():
@@ -74,12 +105,15 @@ class MicrosoftAuthManager:
             return {"profile": profile, "configured": False, "error": f"Corrupt profile JSON: {exc}"}
 
         mode = str(data.get("auth_mode", "unknown"))
+        eff_net = self.effective_network(profile)
         info: dict[str, Any] = {
             "profile": profile,
             "configured": True,
             "auth_mode": mode,
             "tenant_id": data.get("tenant_id", ""),
         }
+        if eff_net.proxy_url:
+            info["has_proxy"] = True
         if mode == "portal_session":
             info["has_cookie"] = bool(data.get("cookie"))
             info["has_xsrf_token"] = bool(data.get("xsrf_token"))
@@ -99,12 +133,19 @@ class MicrosoftAuthManager:
         client_id: str = DEFAULT_GRAPH_POWERSHELL_CLIENT_ID,
         scopes: list[str] | None = None,
         on_prompt: Callable[[str], None] | None = None,
+        proxy_url: str = "",
+        ca_bundle: str = "",
     ) -> dict[str, Any]:
         """Run MSAL Device-Code login isolated strictly to `<workspace>/.sera/creds/`."""
         target_scopes = scopes or ["https://graph.microsoft.com/.default"]
         cache = msal.SerializableTokenCache()
         authority = f"https://login.microsoftonline.com/{tenant_id}"
-        http_client = _build_requests_session(self.network)
+        eff_net = self.effective_network(
+            profile,
+            override_proxy_url=proxy_url,
+            override_ca_bundle=ca_bundle,
+        )
+        http_client = _build_requests_session(eff_net)
         app = msal.PublicClientApplication(
             client_id=client_id,
             authority=authority,
@@ -121,12 +162,16 @@ class MicrosoftAuthManager:
             raise MicrosoftAuthError(
                 f"Device Code authentication failed: {result.get('error_description') or result}"
             )
-        profile_data = {
+        profile_data: dict[str, Any] = {
             "auth_mode": "delegated",
             "tenant_id": tenant_id,
             "client_id": client_id,
             "token_cache": cache.serialize(),
         }
+        if proxy_url.strip():
+            profile_data["proxy_url"] = proxy_url.strip()
+        if ca_bundle.strip():
+            profile_data["ca_bundle"] = ca_bundle.strip()
         self.save_profile(profile, profile_data)
         return {"profile": profile, "tenant_id": tenant_id, "auth_mode": "delegated"}
 
@@ -136,12 +181,19 @@ class MicrosoftAuthManager:
         tenant_id: str,
         client_id: str = DEFAULT_GRAPH_POWERSHELL_CLIENT_ID,
         scopes: list[str] | None = None,
+        proxy_url: str = "",
+        ca_bundle: str = "",
     ) -> dict[str, Any]:
         """Run MSAL Interactive Browser login isolated strictly to `<workspace>/.sera/creds/`."""
         target_scopes = scopes or ["https://graph.microsoft.com/.default"]
         cache = msal.SerializableTokenCache()
         authority = f"https://login.microsoftonline.com/{tenant_id}"
-        http_client = _build_requests_session(self.network)
+        eff_net = self.effective_network(
+            profile,
+            override_proxy_url=proxy_url,
+            override_ca_bundle=ca_bundle,
+        )
+        http_client = _build_requests_session(eff_net)
         app = msal.PublicClientApplication(
             client_id=client_id,
             authority=authority,
@@ -153,12 +205,16 @@ class MicrosoftAuthManager:
             raise MicrosoftAuthError(
                 f"Interactive browser login failed: {result.get('error_description') or result}"
             )
-        profile_data = {
+        profile_data: dict[str, Any] = {
             "auth_mode": "delegated",
             "tenant_id": tenant_id,
             "client_id": client_id,
             "token_cache": cache.serialize(),
         }
+        if proxy_url.strip():
+            profile_data["proxy_url"] = proxy_url.strip()
+        if ca_bundle.strip():
+            profile_data["ca_bundle"] = ca_bundle.strip()
         self.save_profile(profile, profile_data)
         return {"profile": profile, "tenant_id": tenant_id, "auth_mode": "delegated"}
 
@@ -181,7 +237,7 @@ class MicrosoftAuthManager:
         cache = msal.SerializableTokenCache()
         if data.get("token_cache"):
             cache.deserialize(data["token_cache"])
-        http_client = _build_requests_session(self.network)
+        http_client = _build_requests_session(self.effective_network(profile))
 
         if mode in {"service_principal_secret", "service_principal_cert"}:
             if mode == "service_principal_secret":
@@ -276,7 +332,7 @@ class MicrosoftAuthManager:
         if data.get("auth_mode") != "portal_session":
             raise MicrosoftAuthError(
                 f"Profile '{profile}' has auth_mode='{data.get('auth_mode')}', expected 'portal_session' "
-                f"for 180-day MDE host timeline downloads. Run `sera auth add microsoft-portal --profile {profile}`."
+                f"for 180-day MDE host timeline downloads. Run `sera auth add microsoft --mode portal-session --profile {profile}`."
             )
         cookie = str(data.get("cookie", "")).strip()
         xsrf = str(data.get("xsrf_token", "")).strip()

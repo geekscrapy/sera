@@ -103,7 +103,7 @@ class CollectionEngine:
         active_handles: list[SpoolBatchHandle] = []
 
         try:
-            async with SeraHttpClient(self.config.network, sleep_fn=self._sleep) as http:
+            async with SeraHttpClient(connector.source_network(spec.profile), sleep_fn=self._sleep) as http:
                 while (slice_rec := self.db.claim_next_pending_slice(job_id)) is not None:
                     s_dt = parse_utc_iso(slice_rec.start_time)
                     e_dt = parse_utc_iso(slice_rec.end_time)
