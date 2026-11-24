@@ -30,7 +30,7 @@ def test_bigquery_sdk_schema_and_adc_option_specs_contract() -> None:
     jobs_map = {f.name: (f.field_type, f.mode) for f in JOBS_SCHEMA}
     assert jobs_map["events_uploaded"] == ("INT64", "REQUIRED")
 
-    table = bigquery.Table("adc-proj.sera_raw.events", schema=list(EVENTS_SCHEMA))
+    table = bigquery.Table("adc-proj.sera.events", schema=list(EVENTS_SCHEMA))
     table.time_partitioning = bigquery.TimePartitioning(
         type_=bigquery.TimePartitioningType.DAY,
         field="event_timestamp",

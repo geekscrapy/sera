@@ -86,6 +86,6 @@ Each `sub_source` uses **one canonical full-event query template** (`params={}` 
 Field names are validated identifiers (`^[A-Za-z_][A-Za-z0-9_./-]*$`) and values are safely literal-encoded per dialect—never pass raw SQL/KQL operators (`| project`, `| summarize`, `$select`).
 
 ### Customizing Destinations (`sera init` / `sera destination add`)
-- **BigQuery (`type="bigquery"`)**: Uses ambient GCP ADC and environment variables for auth and project selection automatically. Optional overrides: `dataset_id` (`sera_raw`), `events_table` (`events`), `jobs_table` (`collection_jobs`), `location`, `partition_field` (`event_timestamp`), `cluster_fields` (`["source", "sub_source", "table_or_endpoint"]`).
+- **BigQuery (`type="bigquery"`)**: Uses ambient GCP ADC and environment variables for auth and project selection automatically. Optional overrides: `dataset_id` (`sera`), `events_table` (`events`), `jobs_table` (`collection_jobs`), `location`, `partition_field` (`event_timestamp`), `cluster_fields` (`["source", "sub_source", "table_or_endpoint"]`).
 - **External JSONL Directory (`type="jsonl"`)**: Options `output_dir`, `events_subdir` (`events`), `jobs_filename` (`collection_jobs.jsonl`).
 - **HTTP / SIEM HEC (`type="http"`)**: Options `url`, `format` (`ndjson` | `json_array` | `splunk_hec`), `bearer_token` / `hec_token`, `headers`.

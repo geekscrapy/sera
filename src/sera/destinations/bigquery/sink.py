@@ -60,7 +60,7 @@ class BigQueryDestination(BaseDestinationSink):
     @classmethod
     def option_specs(cls) -> tuple[SinkOptionSpec, ...]:
         return (
-            SinkOptionSpec("dataset_id", "BigQuery dataset_id", required=False, default="sera_raw"),
+            SinkOptionSpec("dataset_id", "BigQuery dataset_id", required=False, default="sera"),
             SinkOptionSpec("events_table", "Events table name", required=False, default="events"),
             SinkOptionSpec("jobs_table", "Collection jobs manifest table", required=False, default="collection_jobs"),
             SinkOptionSpec("location", "Optional BigQuery dataset location (e.g. US, EU)", required=False, default=""),
@@ -81,7 +81,7 @@ class BigQueryDestination(BaseDestinationSink):
     ) -> None:
         super().__init__(dest_config, network)
         opts = self.apply_defaults(dest_config.options)
-        self.dataset_id = str(opts.get("dataset_id", "sera_raw")).strip()
+        self.dataset_id = str(opts.get("dataset_id", "sera")).strip()
         self.events_table = str(opts.get("events_table", "events")).strip()
         self.jobs_table = str(opts.get("jobs_table", "collection_jobs")).strip()
         self.location = str(opts.get("location", "")).strip()
