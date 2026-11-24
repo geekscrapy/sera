@@ -1,14 +1,14 @@
 {
   "mcpServers": {
     "sera": {
-      "command": "/Users/matt/Documents/sera/.venv/bin/python",
+      "command": "uvx",
       "args": [
-        "-m",
-        "sera.mcp_server.server"
+        "--from",
+        "git+https://github.com/geekscrapy/sera.git",
+        "sera-mcp"
       ],
       "env": {
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONPATH": "/Users/matt/Documents/sera/git/src"
+        "PYTHONDONTWRITEBYTECODE": "1"
       }
     }
   }

@@ -65,6 +65,18 @@ def test_plugin_packager_produces_valid_dist_zip_and_dist_latest(tmp_path: Path)
     assert manifest["name"] == "sera"
     assert "Secure Extraction for Response Agents" in manifest["displayName"]
 
+    mcp_cfg = json.loads((dist_latest / "mcp_config.json").read_text(encoding="utf-8"))
+    assert mcp_cfg["mcpServers"]["sera"]["command"] == "uvx"
+    assert mcp_cfg["mcpServers"]["sera"]["args"] == [
+        "--from",
+        "git+https://github.com/geekscrapy/sera.git",
+        "sera-mcp",
+    ]
+
+    hooks_cfg = json.loads((dist_latest / "hooks.json").read_text(encoding="utf-8"))
+    hook_cmd = hooks_cfg["sera-forensic-guard"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert hook_cmd == "python3 -B ./hooks/pre_tool_guard.py"
+
     assert (dist_latest / "rules" / "sera.md").is_file()
     skill_text = (dist_latest / "skills" / "sera" / "SKILL.md").read_text(encoding="utf-8")
     assert "Init Setup" in skill_text

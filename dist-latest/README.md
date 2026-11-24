@@ -3,7 +3,7 @@
 Antigravity plugin providing tamper-proof, template-driven DFIR telemetry acquisition with full CLI and MCP parity.
 
 ## Testing via Symlink
-Link `dist-latest` directly into your global Antigravity plugins directory:
+From the `git/` directory, link `dist-latest` directly into your global Antigravity plugins directory:
 ```bash
-ln -s /Users/matt/Documents/sera/git/dist-latest ~/.gemini/config/plugins/sera
+ln -s "$(pwd)/dist-latest" ~/.gemini/config/plugins/sera
 ```

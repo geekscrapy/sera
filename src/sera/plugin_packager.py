@@ -125,9 +125,9 @@ PLUGIN_README_MD = """# SERA — Secure Extraction for Response Agents
 Antigravity plugin providing tamper-proof, template-driven DFIR telemetry acquisition with full CLI and MCP parity.
 
 ## Testing via Symlink
-Link `dist-latest` directly into your global Antigravity plugins directory:
+From the `git/` directory, link `dist-latest` directly into your global Antigravity plugins directory:
 ```bash
-ln -s /Users/matt/Documents/sera/git/dist-latest ~/.gemini/config/plugins/sera
+ln -s "$(pwd)/dist-latest" ~/.gemini/config/plugins/sera
 ```
 """
 
@@ -136,14 +136,11 @@ def build_plugin_release(
     repo_git_dir: Path,
     *,
     version: str = __version__,
-    python_executable: str | None = None,
 ) -> dict[str, Any]:
     """Build unpacked `dist-latest/` and versioned `dist/sera-<version>.zip` inside `repo_git_dir`."""
     git_root = repo_git_dir.resolve()
     dist_dir = git_root / "dist"
     dist_latest = git_root / "dist-latest"
-    py_exe = python_executable or sys.executable
-    src_dir = str((git_root / "src").resolve())
 
     dist_dir.mkdir(parents=True, exist_ok=True)
     if dist_latest.exists() or dist_latest.is_symlink():
@@ -179,15 +176,18 @@ def build_plugin_release(
     # 2. README.md
     (dist_latest / "README.md").write_text(PLUGIN_README_MD, encoding="utf-8")
 
-    # 3. mcp_config.json
+    # 3. mcp_config.json (zero hardcoded paths; `uvx` fetches/caches and runs `sera-mcp` automatically)
     mcp_config = {
         "mcpServers": {
             "sera": {
-                "command": py_exe,
-                "args": ["-m", "sera.mcp_server.server"],
+                "command": "uvx",
+                "args": [
+                    "--from",
+                    "git+https://github.com/geekscrapy/sera.git",
+                    "sera-mcp",
+                ],
                 "env": {
                     "PYTHONDONTWRITEBYTECODE": "1",
-                    "PYTHONPATH": src_dir,
                 },
             }
         }
@@ -215,7 +215,7 @@ def build_plugin_release(
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"\"{py_exe}\" -B ./hooks/pre_tool_guard.py",
+                            "command": "python3 -B ./hooks/pre_tool_guard.py",
                             "timeout": 10,
                         }
                     ],

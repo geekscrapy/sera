@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/matt/Documents/sera/.venv/bin/python\" -B ./hooks/pre_tool_guard.py",
+            "command": "python3 -B ./hooks/pre_tool_guard.py",
             "timeout": 10
           }
         ]
