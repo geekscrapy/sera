@@ -16,6 +16,11 @@ from rich.panel import Panel
 from rich.table import Table
 
 from sera import __app_name__, __version__
+from sera.cli.monitor import (
+    follow_activity_stream,
+    get_recent_activity_snapshot,
+    wait_for_next_activity_event,
+)
 from sera.cli.watch import run_job_watcher
 from sera.config import load_workspace_config, save_workspace_config
 from sera.core.models import JobRecord, JobSpec
@@ -96,11 +101,15 @@ def cmd_init(
 ) -> None:
     """Initialize `<workspace>/.sera/` (`config.toml`, `sera.sqlite`, `creds/`, `spool/`) and sync active `.venv` deps."""
     ws = _ws(workspace)
-    result = initialize_workspace(
-        ws,
-        batch_size=batch_size,
-        sync_uv_deps=not skip_uv,
-    )
+    try:
+        result = initialize_workspace(
+            ws,
+            batch_size=batch_size,
+            sync_uv_deps=not skip_uv,
+        )
+    except Exception as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
     if as_json:
         sys.stdout.write(json.dumps(result, indent=2) + "\n")
         return
@@ -203,7 +212,12 @@ def cmd_source_add(
     ws = _ws(workspace)
     svc = SeraService(ws)
     stype = source_type.strip()
-    src_cls = svc.sources.get_class(stype)
+    try:
+        src_cls = svc.sources.get_class(stype)
+    except Exception as exc:
+        svc.db.log_activity("source.add", "failed", f"Unknown source plugin '{stype}'", error_message=str(exc))
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
     modes = src_cls.auth_modes()
 
     chosen_mode = auth_mode.strip()
@@ -215,7 +229,15 @@ def cmd_source_add(
                 f"Authentication mode for '{stype}' ({', '.join(sorted(modes))})"
             ).strip()
     if chosen_mode not in modes:
-        console.print(f"[red]Unknown auth mode '{chosen_mode}' for '{stype}'. Valid: {', '.join(sorted(modes))}[/red]")
+        msg = f"Unknown auth mode '{chosen_mode}' for '{stype}'. Valid: {', '.join(sorted(modes))}"
+        svc.db.log_activity(
+            "source.add",
+            "failed",
+            f"Invalid auth mode '{chosen_mode}' for source '{stype}'",
+            details={"source_type": stype, "profile": name.strip()},
+            error_message=msg,
+        )
+        console.print(f"[red]{msg}[/red]")
         raise typer.Exit(code=1)
 
     combined = json.loads(options_json)
@@ -248,15 +270,19 @@ def cmd_source_add(
             elif fspec.default:
                 auth_vals[fspec.name] = fspec.default
 
-    receipt = svc.add_source(
-        source_type=stype,
-        profile=name.strip(),
-        auth_mode=chosen_mode,
-        source_options=source_opts,
-        auth_values=auth_vals,
-        set_default=set_default,
-        on_message=lambda msg: console.print(Panel(msg, title=f"{stype} Authentication")),
-    )
+    try:
+        receipt = svc.add_source(
+            source_type=stype,
+            profile=name.strip(),
+            auth_mode=chosen_mode,
+            source_options=source_opts,
+            auth_values=auth_vals,
+            set_default=set_default,
+            on_message=lambda msg: console.print(Panel(msg, title=f"{stype} Authentication")),
+        )
+    except Exception as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
     if as_json:
         sys.stdout.write(json.dumps(receipt, indent=2) + "\n")
     else:
@@ -272,13 +298,16 @@ def cmd_source_set_default(
 ) -> None:
     """Set the default source profile in `.sera/config.toml`."""
     ws = _ws(workspace)
-    cfg = load_workspace_config(ws)
-    if name not in cfg.sources:
-        available = ", ".join(sorted(cfg.sources)) or "<none>"
-        console.print(f"[red]Source profile '{name}' not found (available: {available})[/red]")
+    svc = SeraService(ws)
+    if name not in svc.config.sources:
+        available = ", ".join(sorted(svc.config.sources)) or "<none>"
+        msg = f"Source profile '{name}' not found (available: {available})"
+        svc.db.log_activity("source.set_default", "failed", msg, error_message=msg)
+        console.print(f"[red]{msg}[/red]")
         raise typer.Exit(code=1)
-    cfg.default_source = name
-    save_workspace_config(ws, cfg)
+    svc.config.default_source = name
+    save_workspace_config(ws, svc.config)
+    svc.db.log_activity("source.set_default", "completed", f"Default source updated to '{name}'", details={"name": name})
     console.print(f"[green]Default source updated to '[bold]{name}[/bold]'.[/green]")
 
 
@@ -379,7 +408,12 @@ def cmd_dest_add(
     ws = _ws(workspace)
     svc = SeraService(ws)
     dtype = dest_type.strip()
-    sink_cls = svc.destinations.get_class(dtype)
+    try:
+        sink_cls = svc.destinations.get_class(dtype)
+    except Exception as exc:
+        svc.db.log_activity("dest.add", "failed", f"Unknown destination plugin '{dtype}'", error_message=str(exc))
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
     modes = sink_cls.auth_modes()
 
     combined = json.loads(options_json)
@@ -389,7 +423,15 @@ def cmd_dest_add(
 
     chosen_mode = auth_mode.strip() or next(iter(modes))
     if chosen_mode not in modes:
-        console.print(f"[red]Unknown auth mode '{chosen_mode}' for '{dtype}'. Valid: {', '.join(sorted(modes))}[/red]")
+        msg = f"Unknown auth mode '{chosen_mode}' for '{dtype}'. Valid: {', '.join(sorted(modes))}"
+        svc.db.log_activity(
+            "dest.add",
+            "failed",
+            f"Invalid auth mode '{chosen_mode}' for destination '{dtype}'",
+            details={"name": name.strip(), "type": dtype},
+            error_message=msg,
+        )
+        console.print(f"[red]{msg}[/red]")
         raise typer.Exit(code=1)
 
     opt_specs = {s.name: s for s in sink_cls.option_specs()}
@@ -415,14 +457,18 @@ def cmd_dest_add(
             elif fspec.default:
                 auth_vals[fspec.name] = fspec.default
 
-    receipt = svc.add_destination(
-        dest_type=dtype,
-        name=name.strip(),
-        auth_mode=chosen_mode,
-        dest_options=dest_opts,
-        auth_values=auth_vals,
-        set_default=set_default,
-    )
+    try:
+        receipt = svc.add_destination(
+            dest_type=dtype,
+            name=name.strip(),
+            auth_mode=chosen_mode,
+            dest_options=dest_opts,
+            auth_values=auth_vals,
+            set_default=set_default,
+        )
+    except Exception as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
     if as_json:
         sys.stdout.write(json.dumps(receipt, indent=2) + "\n")
     else:
@@ -438,10 +484,16 @@ def cmd_dest_set_default(
 ) -> None:
     """Set the default destination profile in `.sera/config.toml`."""
     ws = _ws(workspace)
-    cfg = load_workspace_config(ws)
-    cfg.get_destination(name)
-    cfg.default_destination = name
-    save_workspace_config(ws, cfg)
+    svc = SeraService(ws)
+    try:
+        svc.config.get_destination(name)
+    except Exception as exc:
+        svc.db.log_activity("dest.set_default", "failed", f"Destination '{name}' not found", error_message=str(exc))
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    svc.config.default_destination = name
+    save_workspace_config(ws, svc.config)
+    svc.db.log_activity("dest.set_default", "completed", f"Default destination updated to '{name}'", details={"name": name})
     console.print(f"[green]Default destination updated to '[bold]{name}[/bold]'.[/green]")
 
 
@@ -766,6 +818,49 @@ def cmd_watch(
         exit_when_idle=exit_when_idle,
         console=console,
     )
+
+
+@app.command("monitor")
+def cmd_monitor(
+    since_seq: Optional[int] = typer.Option(
+        None,
+        "--since-seq",
+        help="Wait for or return events strictly newer than this monotonic sequence cursor",
+    ),
+    recent: bool = typer.Option(
+        False,
+        "--recent",
+        help="Return recent activity events, current `last_seq`, and `workspace_state` immediately without waiting",
+    ),
+    follow: bool = typer.Option(
+        False,
+        "--follow",
+        "-f",
+        help="Continuously stream JSONL events as they occur instead of exiting after the next completion/failure",
+    ),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max events returned in `--recent` mode"),
+    timeout: float = typer.Option(600.0, "--timeout", help="Max seconds to wait for next completion/failure event"),
+    interval: float = typer.Option(0.5, "--interval", "-i", help="Poll interval in seconds"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace", "-w", help="Engagement workspace directory"),
+) -> None:
+    """Monitor secret-scrubbed SERA lifecycle logs (LLM-friendly JSON) to auto-propose next steps or fixes."""
+    ws = _ws(workspace)
+    if recent:
+        snap = get_recent_activity_snapshot(ws, limit=limit)
+        sys.stdout.write(json.dumps(snap, indent=2) + "\n")
+        return
+
+    if follow:
+        follow_activity_stream(ws, since_seq=since_seq, poll_interval=interval)
+        return
+
+    result = wait_for_next_activity_event(
+        ws,
+        since_seq=since_seq,
+        timeout_seconds=timeout,
+        poll_interval=interval,
+    )
+    sys.stdout.write(json.dumps(result, indent=2) + "\n")
 
 
 @app.command("status")

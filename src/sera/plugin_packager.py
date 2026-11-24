@@ -26,7 +26,8 @@ When acquiring raw telemetry or forensic logs for an engagement:
 3. **Single Canonical Full-Event Template**: Each `sub_source` uses one fixed canonical full-event template (accepting optional typed filter `params`) so 100% of every event is preserved verbatim without summarization or field projection. Schema sampling is intentionally disabled.
 4. **Never Access `.sera/` Directly**: `<workspace>/.sera/` holds engagement credentials, the `sera.sqlite` ledger, and `AES-256-GCM` encrypted spool chunks. Never attempt to read, modify, or delete `.sera/` via file or shell tools.
 5. **Never Ask for Secrets in Chat**: Source and destination onboarding (`sera init`, `sera source add ...`, `sera dest add ...`) must be run out-of-band in the analyst's terminal so credentials never enter chat.
-6. **Concise User Communication**: Give the user crisp summaries and exact next-step setup commands; consult the `sera` skill's `./resources/` files for vendor- or sink-specific flags, proxies, sub-sources, and parameters under the hood.
+6. **Auto-Monitor Terminal Progress (`sera monitor`)**: Whenever you instruct the user to run an out-of-band CLI step (`sera init`, `sera source add ...`, `sera dest add ...`) or wait on background jobs, run `.venv/bin/sera monitor [--since-seq <last_seq>]` in the background (`WaitMsBeforeAsync: 500`). As soon as it exits with a `completed` or `failed` JSON event, automatically propose the next setup step or diagnose the failure and provide the corrected command.
+7. **Concise User Communication**: Give the user crisp summaries and exact next-step setup commands; consult the `sera` skill's `./resources/` files for vendor- or sink-specific flags, proxies, sub-sources, and parameters under the hood.
 """
 
 
@@ -103,6 +104,16 @@ Every runtime MCP tool shares the exact command name and parameter model of the 
 | List recent jobs | `jobs(limit=25)` | `sera jobs` | Instant read from `sera.sqlite` returning recent jobs and workspace uploaded event totals. |
 | Inspect job status | `status(job_id, slices=False)` | `sera status <job_id> [--slices]` | Reports `status`, `events_fetched`, `events_uploaded`, `events_already_uploaded_skipped`, and optional per-slice breakdown. |
 | Resume failed/killed | `resume(job_id)` | `sera resume <job_id>` | Resets only uncommitted (`in_progress`/`failed`) slices to `pending` and skips any events already recorded in `uploaded_events`. |
+
+### Reactive LLM Log Monitoring (`sera monitor`) — Auto-Next-Step & Auto-Fix Loop
+Whenever you give the analyst an out-of-band terminal command (`sera init`, `sera source add ...`, `sera dest add ...`) or want to react when a background job finishes:
+1. Check current state/cursor quickly if needed:
+   `.venv/bin/sera monitor --recent`
+2. Launch the reactive watcher in the background (`run_command` with `WaitMsBeforeAsync: 500`) **in the same turn** you give the user their command:
+   `.venv/bin/sera monitor --since-seq <last_seq>` *(or `.venv/bin/sera monitor` before `init`, which waits even before `.sera/` exists!)*
+3. `sera monitor` blocks quietly until the next `completed` or `failed` lifecycle event (`init`, `source.add`, `dest.add`, `job.completed`, `job.failed`) is written to `sera.sqlite`, then prints secret-scrubbed JSON (`event`, `recommendation`, `workspace_state`, `last_seq`) and exits `0`—automatically waking you up:
+   - **On `status == "completed"`**: Immediately advance the user to the next step (e.g. `init` -> `sera source add ...` -> `sera dest add ...` -> ready for `collect`) and start `sera monitor --since-seq <last_seq>` for the next step.
+   - **On `status == "failed"`**: Inspect `error_message` and `recommendation` (e.g. SOCKS5 tunnel down, invalid `tenant_id`, missing GCP ADC), propose the exact fix + corrected command, and start `sera monitor --since-seq <last_seq>` to catch their retry.
 
 ---
 

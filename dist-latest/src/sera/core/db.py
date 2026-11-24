@@ -94,7 +94,40 @@ CREATE TABLE IF NOT EXISTS auth_profiles (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (source, profile)
 );
+
+CREATE TABLE IF NOT EXISTS activity_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    error_message TEXT NOT NULL DEFAULT '',
+    next_step_hint TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_events_seq
+    ON activity_events(seq, status);
 """
+
+
+_SECRET_KEY_FRAGMENTS = ("secret", "token", "cookie", "password", "passwd", "apikey", "api_key")
+
+
+def scrub_secret_fields(data: dict[str, Any] | None) -> dict[str, Any]:
+    """Redact secret values before writing operational activity logs."""
+    if not data:
+        return {}
+    clean: dict[str, Any] = {}
+    for k, v in data.items():
+        lk = str(k).lower()
+        if any(frag in lk for frag in _SECRET_KEY_FRAGMENTS) or lk == "private_key":
+            clean[k] = "[REDACTED]" if v else ""
+        elif isinstance(v, dict):
+            clean[k] = scrub_secret_fields(v)
+        else:
+            clean[k] = v
+    return clean
 
 
 class SeraDatabase:
@@ -550,6 +583,111 @@ class SeraDatabase:
             else:
                 row = conn.execute("SELECT COUNT(*) AS cnt FROM uploaded_events").fetchone()
         return int(row["cnt"]) if row else 0
+
+    def log_activity(
+        self,
+        event_type: str,
+        status: str,
+        summary: str,
+        *,
+        details: dict[str, Any] | None = None,
+        error_message: str = "",
+        next_step_hint: str = "",
+    ) -> int:
+        """Append a secret-scrubbed operational event to `activity_events` and return its monotonic `seq`."""
+        now = utc_now_iso()
+        safe_details = scrub_secret_fields(details)
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO activity_events (
+                    created_at, event_type, status, summary, details_json, error_message, next_step_hint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    event_type,
+                    status,
+                    summary,
+                    json.dumps(safe_details, sort_keys=True),
+                    error_message,
+                    next_step_hint,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def latest_activity_seq(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM activity_events").fetchone()
+        return int(row["max_seq"]) if row else 0
+
+    def list_activity_events(
+        self,
+        *,
+        since_seq: int | None = None,
+        limit: int = 50,
+        actionable_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return activity events ordered ascending when `since_seq` is set, or recent events ordered ascending."""
+        with self.connect() as conn:
+            if since_seq is not None:
+                if actionable_only:
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM activity_events
+                        WHERE seq > ? AND status IN ('completed', 'failed')
+                        ORDER BY seq ASC
+                        LIMIT ?
+                        """,
+                        (since_seq, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM activity_events
+                        WHERE seq > ?
+                        ORDER BY seq ASC
+                        LIMIT ?
+                        """,
+                        (since_seq, limit),
+                    ).fetchall()
+            else:
+                if actionable_only:
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM (
+                            SELECT * FROM activity_events
+                            WHERE status IN ('completed', 'failed')
+                            ORDER BY seq DESC
+                            LIMIT ?
+                        ) ORDER BY seq ASC
+                        """,
+                        (limit,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM (
+                            SELECT * FROM activity_events
+                            ORDER BY seq DESC
+                            LIMIT ?
+                        ) ORDER BY seq ASC
+                        """,
+                        (limit,),
+                    ).fetchall()
+        return [
+            {
+                "seq": int(r["seq"]),
+                "created_at": str(r["created_at"]),
+                "event_type": str(r["event_type"]),
+                "status": str(r["status"]),
+                "summary": str(r["summary"]),
+                "details": json.loads(r["details_json"] or "{}"),
+                "error_message": str(r["error_message"] or ""),
+                "next_step_hint": str(r["next_step_hint"] or ""),
+            }
+            for r in rows
+        ]
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> JobRecord:

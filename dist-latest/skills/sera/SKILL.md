@@ -63,6 +63,16 @@ Every runtime MCP tool shares the exact command name and parameter model of the 
 | Inspect job status | `status(job_id, slices=False)` | `sera status <job_id> [--slices]` | Reports `status`, `events_fetched`, `events_uploaded`, `events_already_uploaded_skipped`, and optional per-slice breakdown. |
 | Resume failed/killed | `resume(job_id)` | `sera resume <job_id>` | Resets only uncommitted (`in_progress`/`failed`) slices to `pending` and skips any events already recorded in `uploaded_events`. |
 
+### Reactive LLM Log Monitoring (`sera monitor`) — Auto-Next-Step & Auto-Fix Loop
+Whenever you give the analyst an out-of-band terminal command (`sera init`, `sera source add ...`, `sera dest add ...`) or want to react when a background job finishes:
+1. Check current state/cursor quickly if needed:
+   `.venv/bin/sera monitor --recent`
+2. Launch the reactive watcher in the background (`run_command` with `WaitMsBeforeAsync: 500`) **in the same turn** you give the user their command:
+   `.venv/bin/sera monitor --since-seq <last_seq>` *(or `.venv/bin/sera monitor` before `init`, which waits even before `.sera/` exists!)*
+3. `sera monitor` blocks quietly until the next `completed` or `failed` lifecycle event (`init`, `source.add`, `dest.add`, `job.completed`, `job.failed`) is written to `sera.sqlite`, then prints secret-scrubbed JSON (`event`, `recommendation`, `workspace_state`, `last_seq`) and exits `0`—automatically waking you up:
+   - **On `status == "completed"`**: Immediately advance the user to the next step (e.g. `init` -> `sera source add ...` -> `sera dest add ...` -> ready for `collect`) and start `sera monitor --since-seq <last_seq>` for the next step.
+   - **On `status == "failed"`**: Inspect `error_message` and `recommendation` (e.g. SOCKS5 tunnel down, invalid `tenant_id`, missing GCP ADC), propose the exact fix + corrected command, and start `sera monitor --since-seq <last_seq>` to catch their retry.
+
 ---
 
 ## 3. Source & Destination Plugin Reference (`./resources/`)

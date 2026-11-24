@@ -107,40 +107,66 @@ def initialize_workspace(
     sdir = sera_dir_for_workspace(ws)
     for sub in ("creds", "spool"):
         (sdir / sub).mkdir(parents=True, exist_ok=True)
+    db = SeraDatabase(sdir / "sera.sqlite")
 
     src_reg = source_registry or SourceRegistry()
     dst_reg = destination_registry or DestinationRegistry()
 
-    cfg_path = sdir / "config.toml"
-    if cfg_path.exists():
-        cfg = load_workspace_config(ws)
-        cfg.batch_size = batch_size
-        if source_defaults:
-            cfg.source_defaults.update(source_defaults)
-    else:
-        cfg = WorkspaceConfig(
-            batch_size=batch_size,
-            network=NetworkConfig(),
-            source_defaults=dict(source_defaults or {}),
+    try:
+        cfg_path = sdir / "config.toml"
+        if cfg_path.exists():
+            cfg = load_workspace_config(ws)
+            cfg.batch_size = batch_size
+            if source_defaults:
+                cfg.source_defaults.update(source_defaults)
+        else:
+            cfg = WorkspaceConfig(
+                batch_size=batch_size,
+                network=NetworkConfig(),
+                source_defaults=dict(source_defaults or {}),
+            )
+
+        if destination_type.strip():
+            dtype = destination_type.strip()
+            dname = destination_name.strip() or "default"
+            sink_cls = dst_reg.get_class(dtype)
+            normalized_opts = sink_cls.apply_defaults(dict(destination_options or {}))
+            dest_cfg = DestinationConfig(name=dname, type=dtype, options=normalized_opts)
+            dst_reg.create(dest_cfg, workspace_dir=ws)
+            cfg.destinations[dname] = dest_cfg
+            if not cfg.default_destination:
+                cfg.default_destination = dname
+
+        saved_cfg_path = save_workspace_config(ws, cfg)
+        uv_info = (
+            ensure_uv_dependencies(ws, src_reg, dst_reg)
+            if sync_uv_deps
+            else {"synced": False, "reason": "skipped"}
         )
+    except Exception as exc:
+        db.log_activity(
+            "init",
+            "failed",
+            f"Workspace initialization failed in '{ws}'",
+            details={"batch_size": batch_size, "destination_type": destination_type},
+            error_message=str(exc),
+        )
+        raise
 
-    if destination_type.strip():
-        dtype = destination_type.strip()
-        dname = destination_name.strip() or "default"
-        sink_cls = dst_reg.get_class(dtype)
-        normalized_opts = sink_cls.apply_defaults(dict(destination_options or {}))
-        dest_cfg = DestinationConfig(name=dname, type=dtype, options=normalized_opts)
-        dst_reg.create(dest_cfg, workspace_dir=ws)
-        cfg.destinations[dname] = dest_cfg
-        if not cfg.default_destination:
-            cfg.default_destination = dname
-
-    saved_cfg_path = save_workspace_config(ws, cfg)
-    db = SeraDatabase(sdir / "sera.sqlite")
-    uv_info = (
-        ensure_uv_dependencies(ws, src_reg, dst_reg)
-        if sync_uv_deps
-        else {"synced": False, "reason": "skipped"}
+    next_hint = (
+        "Workspace initialized. Next step: configure a telemetry source and authentication "
+        "via `sera source add <type>` (inspect options with `sera source types`)."
+    )
+    db.log_activity(
+        "init",
+        "completed",
+        "Initialized SERA workspace",
+        details={
+            "batch_size": batch_size,
+            "uv_synced": bool(uv_info.get("synced")),
+            "default_destination": cfg.default_destination,
+        },
+        next_step_hint=next_hint,
     )
 
     return {
@@ -227,44 +253,78 @@ class SeraService:
         self.reload_config()
         stype = source_type.strip()
         pname = profile.strip() or "default"
-        src_cls = self.sources.get_class(stype)
+        try:
+            src_cls = self.sources.get_class(stype)
 
-        existing_opts = (
-            dict(self.config.sources[pname].options)
-            if pname in self.config.sources and self.config.sources[pname].type == stype
-            else {}
+            existing_opts = (
+                dict(self.config.sources[pname].options)
+                if pname in self.config.sources and self.config.sources[pname].type == stype
+                else {}
+            )
+            existing_opts.update(source_options or {})
+            normalized_opts = src_cls.apply_defaults(existing_opts)
+
+            self.config.sources[pname] = SourceProfileConfig(
+                name=pname,
+                type=stype,
+                options=normalized_opts,
+            )
+            if set_default or not self.config.default_source:
+                self.config.default_source = pname
+            save_workspace_config(self.workspace_dir, self.config)
+
+            connector = self.get_connector(stype)
+            auth_inputs = dict(auth_values or {})
+            # Also pass source proxy_url / ca_bundle if present so initial interactive login (device-code/browser) uses it
+            for net_key in ("proxy_url", "ca_bundle"):
+                if normalized_opts.get(net_key) and net_key not in auth_inputs:
+                    auth_inputs[net_key] = str(normalized_opts[net_key])
+
+            self.db.log_activity(
+                "source.add",
+                "started",
+                f"Starting authentication for source '{pname}' ({stype}, mode={auth_mode.strip()})",
+                details={"source_type": stype, "profile": pname, "auth_mode": auth_mode.strip(), "options": normalized_opts},
+            )
+            receipt = connector.configure_auth(
+                profile=pname,
+                mode=auth_mode.strip(),
+                values=auth_inputs,
+                on_message=on_message,
+            )
+            self.db.upsert_auth_profile(
+                source=stype,
+                profile=pname,
+                auth_mode=str(receipt.get("auth_mode", auth_mode)),
+                tenant_id=str(receipt.get("tenant_id", "")),
+                client_id=str(receipt.get("client_id", "")),
+            )
+        except Exception as exc:
+            self.db.log_activity(
+                "source.add",
+                "failed",
+                f"Failed to configure source '{pname}' ({stype}, mode={auth_mode.strip()})",
+                details={"source_type": stype, "profile": pname, "auth_mode": auth_mode.strip(), "options": source_options or {}},
+                error_message=str(exc),
+            )
+            raise
+
+        next_hint = (
+            "Source configured and authenticated. Next step: configure a destination sink via `sera dest add <type>`."
+            if not self.config.destinations
+            else "Source and destination are both configured. Ready to submit extraction jobs via MCP `collect` or `sera collect`."
         )
-        existing_opts.update(source_options or {})
-        normalized_opts = src_cls.apply_defaults(existing_opts)
-
-        self.config.sources[pname] = SourceProfileConfig(
-            name=pname,
-            type=stype,
-            options=normalized_opts,
-        )
-        if set_default or not self.config.default_source:
-            self.config.default_source = pname
-        save_workspace_config(self.workspace_dir, self.config)
-
-        connector = self.get_connector(stype)
-        auth_inputs = dict(auth_values or {})
-        # Also pass source proxy_url / ca_bundle if present so initial interactive login (device-code/browser) uses it
-        for net_key in ("proxy_url", "ca_bundle"):
-            if normalized_opts.get(net_key) and net_key not in auth_inputs:
-                auth_inputs[net_key] = str(normalized_opts[net_key])
-
-        receipt = connector.configure_auth(
-            profile=pname,
-            mode=auth_mode.strip(),
-            values=auth_inputs,
-            on_message=on_message,
-        )
-        self.db.upsert_auth_profile(
-            source=stype,
-            profile=pname,
-            auth_mode=str(receipt.get("auth_mode", auth_mode)),
-            tenant_id=str(receipt.get("tenant_id", "")),
-            client_id=str(receipt.get("client_id", "")),
+        self.db.log_activity(
+            "source.add",
+            "completed",
+            f"Configured source '{pname}' ({stype}, auth={receipt.get('auth_mode', auth_mode.strip())})",
+            details={
+                "source_type": stype,
+                "profile": pname,
+                "auth_mode": str(receipt.get("auth_mode", auth_mode.strip())),
+                "options": normalized_opts,
+            },
+            next_step_hint=next_hint,
         )
         return {
             **receipt,
@@ -310,33 +370,64 @@ class SeraService:
         self.reload_config()
         dtype = dest_type.strip()
         dname = name.strip() or "default"
-        sink_cls = self.destinations.get_class(dtype)
-        modes = sink_cls.auth_modes()
-        resolved_mode = auth_mode.strip() or next(iter(modes))
-        if resolved_mode not in modes:
-            raise ValueError(
-                f"Unsupported auth mode '{resolved_mode}' for destination '{dtype}'. Valid: {', '.join(sorted(modes))}"
+        try:
+            sink_cls = self.destinations.get_class(dtype)
+            modes = sink_cls.auth_modes()
+            resolved_mode = auth_mode.strip() or next(iter(modes))
+            if resolved_mode not in modes:
+                raise ValueError(
+                    f"Unsupported auth mode '{resolved_mode}' for destination '{dtype}'. Valid: {', '.join(sorted(modes))}"
+                )
+
+            normalized_opts = sink_cls.apply_defaults(dict(dest_options or {}))
+            dest_cfg = DestinationConfig(name=dname, type=dtype, options=normalized_opts)
+            sink = self.destinations.create(dest_cfg, workspace_dir=self.workspace_dir)
+            auth_receipt = sink.configure_auth(
+                self.workspace_dir,
+                mode=resolved_mode,
+                values=dict(auth_values or {}),
             )
 
-        normalized_opts = sink_cls.apply_defaults(dict(dest_options or {}))
-        dest_cfg = DestinationConfig(name=dname, type=dtype, options=normalized_opts)
-        sink = self.destinations.create(dest_cfg, workspace_dir=self.workspace_dir)
-        auth_receipt = sink.configure_auth(
-            self.workspace_dir,
-            mode=resolved_mode,
-            values=dict(auth_values or {}),
-        )
+            self.config.destinations[dname] = dest_cfg
+            if set_default or not self.config.default_destination:
+                self.config.default_destination = dname
+            save_workspace_config(self.workspace_dir, self.config)
+            target_desc = sink.describe_target()
+        except Exception as exc:
+            self.db.log_activity(
+                "dest.add",
+                "failed",
+                f"Failed to configure destination '{dname}' ({dtype})",
+                details={"name": dname, "type": dtype, "auth_mode": auth_mode.strip(), "options": dest_options or {}},
+                error_message=str(exc),
+            )
+            raise
 
-        self.config.destinations[dname] = dest_cfg
-        if set_default or not self.config.default_destination:
-            self.config.default_destination = dname
-        save_workspace_config(self.workspace_dir, self.config)
+        has_source = bool(self.db.list_auth_profiles())
+        next_hint = (
+            "Destination and source are both configured. Ready to submit extraction jobs via MCP `collect` or `sera collect`."
+            if has_source
+            else "Destination configured. Next step: configure a telemetry source and authentication via `sera source add <type>`."
+        )
+        self.db.log_activity(
+            "dest.add",
+            "completed",
+            f"Configured destination '{dname}' ({dtype}) -> {target_desc}",
+            details={
+                "name": dname,
+                "type": dtype,
+                "auth_mode": auth_receipt["auth_mode"],
+                "target": target_desc,
+                "options": normalized_opts,
+            },
+            next_step_hint=next_hint,
+        )
 
         return {
             "name": dname,
             "type": dtype,
             "auth_mode": auth_receipt["auth_mode"],
-            "target": sink.describe_target(),
+            "target": target_desc,
             "default_destination": self.config.default_destination == dname,
             "summary": sink.config_summary(),
         }
@@ -427,12 +518,26 @@ class SeraService:
             spool=self.spool,
         )
         job_id = engine.enqueue_job(normalized_spec, connector, sink)
+        lookup_hint = sink.format_lookup_hint(job_id)
+        self.db.log_activity(
+            "job.queued",
+            "started",
+            f"Queued extraction job '{job_id}' ({resolved_type}/{spec.sub_source}:{spec.table_or_endpoint})",
+            details={
+                "job_id": job_id,
+                "source": resolved_type,
+                "sub_source": spec.sub_source,
+                "target": spec.table_or_endpoint,
+                "destination_target": sink.describe_target(),
+                "lookup_hint": lookup_hint,
+            },
+        )
         return {
             "job_id": job_id,
             "status": JobStatus.PENDING.value,
             "destination_name": sink.dest_config.name,
             "destination_target": sink.describe_target(),
-            "lookup_hint": sink.format_lookup_hint(job_id),
+            "lookup_hint": lookup_hint,
         }
 
     async def execute_enqueued_job(
@@ -449,12 +554,46 @@ class SeraService:
             db=self.db,
             spool=self.spool,
         )
-        return await engine.execute_job(
-            job_id=job_id,
-            connector=connector,
-            sink=sink,
-            on_slice_progress=on_slice_progress,
+        try:
+            final_rec = await engine.execute_job(
+                job_id=job_id,
+                connector=connector,
+                sink=sink,
+                on_slice_progress=on_slice_progress,
+            )
+        except Exception as exc:
+            self.db.log_activity(
+                "job.failed",
+                "failed",
+                f"Extraction job '{job_id}' failed",
+                details={
+                    "job_id": job_id,
+                    "source": job.source,
+                    "sub_source": job.sub_source,
+                    "target": job.table_or_endpoint,
+                },
+                error_message=str(exc),
+            )
+            raise
+
+        lookup_hint = sink.format_lookup_hint(job_id)
+        self.db.log_activity(
+            "job.completed",
+            "completed",
+            f"Completed job '{job_id}' ({final_rec.events_uploaded} events uploaded)",
+            details={
+                "job_id": job_id,
+                "source": final_rec.source,
+                "sub_source": final_rec.sub_source,
+                "target": final_rec.table_or_endpoint,
+                "events_uploaded": final_rec.events_uploaded,
+                "events_skipped_uploaded": final_rec.events_skipped_uploaded,
+                "destination_target": final_rec.destination_target,
+                "lookup_hint": lookup_hint,
+            },
+            next_step_hint=f"Job `{job_id}` finished uploading ({final_rec.events_uploaded} events). Query via: `{lookup_hint}`",
         )
+        return final_rec
 
     def submit_job_async(self, spec: JobSpec) -> dict[str, Any]:
         """Non-blocking job submission for MCP: enqueues job, schedules background task, returns `job_id` immediately."""
