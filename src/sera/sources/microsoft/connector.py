@@ -102,10 +102,10 @@ class MicrosoftSourceConnector(BaseSourceConnector):
 
         if spec.sub_source == "entra":
             validate_entra_endpoint(spec.table_or_endpoint)
-            templates.render_odata_predicate(spec.template, "entra", spec.params)
+            templates.render_odata_predicate("entra", spec.params)
         elif spec.sub_source == "purview_ual":
             validate_purview_endpoint(spec.table_or_endpoint)
-            templates.render_purview_filters(spec.template, spec.params)
+            templates.render_purview_filters(spec.params)
         elif spec.sub_source == "log_analytics":
             ws_id = self._resolve_target_id(spec, "default_workspace_id")
             if not ws_id:
@@ -114,16 +114,16 @@ class MicrosoftSourceConnector(BaseSourceConnector):
                 )
             validate_table_ident(spec.table_or_endpoint)
             templates.render_kql_query(
-                spec.template, "log_analytics", spec.table_or_endpoint, "TimeGenerated", s_iso, e_iso, spec.params
+                "log_analytics", spec.table_or_endpoint, "TimeGenerated", s_iso, e_iso, spec.params
             )
         elif spec.sub_source == "defender_hunting":
             validate_table_ident(spec.table_or_endpoint)
             templates.render_kql_query(
-                spec.template, "defender_hunting", spec.table_or_endpoint, "Timestamp", s_iso, e_iso, spec.params
+                "defender_hunting", spec.table_or_endpoint, "Timestamp", s_iso, e_iso, spec.params
             )
         elif spec.sub_source == "defender_timeline":
             validate_machine_id(spec.table_or_endpoint)
-            templates.render_mde_timeline_params(spec.template, spec.table_or_endpoint, spec.params)
+            templates.render_mde_timeline_params(spec.table_or_endpoint, spec.params)
         elif spec.sub_source == "arm_activity":
             sub_id = self._resolve_target_id(spec, "default_subscription_id")
             if not sub_id:
@@ -131,7 +131,7 @@ class MicrosoftSourceConnector(BaseSourceConnector):
                     "ARM Activity Logs require `target_id` (subscription GUID) or `default_subscription_id` in .sera/config.toml"
                 )
             validate_arm_endpoint(spec.table_or_endpoint)
-            templates.render_odata_predicate(spec.template, "arm_activity", spec.params)
+            templates.render_odata_predicate("arm_activity", spec.params)
 
     def check_auth_status(self, profile: str = "default") -> dict[str, Any]:
         return self.auth.check_status(profile=profile)

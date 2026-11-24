@@ -47,7 +47,7 @@ async def fetch_arm_activity_slice(
             "ARM Activity Logs require a 'target_id' (Azure subscription_id) or default_subscription_id in .sera/config.toml"
         )
 
-    extra_pred = templates.render_odata_predicate(spec.template, "arm_activity", spec.params)
+    extra_pred = templates.render_odata_predicate("arm_activity", spec.params)
     start_iso = format_utc_iso(slice_start)
     # Subtract 1 microsecond for ARM's `le` upper bound to keep `[slice_start, slice_end)` half-open
     end_inclusive_dt = max(slice_start, slice_end - timedelta(microseconds=1))

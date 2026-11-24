@@ -53,8 +53,7 @@ async def test_entra_pagination_429_retry_and_full_fidelity(tmp_path: Path) -> N
         table_or_endpoint="signIns",
         start_time="2026-11-20T00:00:00Z",
         end_time="2026-11-21T00:00:00Z",
-        template="by_user",
-        params={"users": ["alice@contoso.com"]},
+        params={"in_list": {"userPrincipalName": ["alice@contoso.com"]}},
     )
 
     page1 = {
@@ -92,7 +91,6 @@ async def test_purview_ual_async_job_poll_and_records(tmp_path: Path) -> None:
         table_or_endpoint="auditLogRecords",
         start_time="2026-11-20T00:00:00Z",
         end_time="2026-11-21T00:00:00Z",
-        template="ual_scope",
         params={"operations": ["MailItemsAccessed"]},
     )
 
@@ -138,8 +136,7 @@ async def test_log_analytics_strips_synthetic_item_id_and_detects_partial_error(
         table_or_endpoint="SigninLogs",
         start_time="2026-11-20T00:00:00Z",
         end_time="2026-11-21T00:00:00Z",
-        template="by_actor",
-        params={"actors": ["bob@contoso.com"]},
+        params={"in_list": {"UserPrincipalName": ["bob@contoso.com"]}},
         target_id="ws-guid-123",
     )
 
@@ -186,8 +183,7 @@ async def test_defender_hunting_defender_180d_timeline_and_arm_activity(tmp_path
         table_or_endpoint="DeviceProcessEvents",
         start_time="2026-07-01T00:00:00Z",
         end_time="2026-07-08T00:00:00Z",
-        template="by_host",
-        params={"hosts": ["srv-dc01"]},
+        params={"in_list": {"DeviceName": ["srv-dc01"]}},
     )
     timeline_spec = JobSpec(
         source="microsoft",
@@ -195,7 +191,6 @@ async def test_defender_hunting_defender_180d_timeline_and_arm_activity(tmp_path
         table_or_endpoint="abcdef0123456789abcdef0123456789abcdef01",
         start_time="2026-07-01T00:00:00Z",
         end_time="2026-07-08T00:00:00Z",
-        template="machine_timeline",
         params={"search_text": "lsass"},
         profile="mde_portal",
     )
@@ -205,8 +200,7 @@ async def test_defender_hunting_defender_180d_timeline_and_arm_activity(tmp_path
         table_or_endpoint="management",
         start_time="2026-07-01T00:00:00Z",
         end_time="2026-07-08T00:00:00Z",
-        template="by_caller",
-        params={"caller": "ops@contoso.com"},
+        params={"equals": {"caller": "ops@contoso.com"}},
         target_id="sub-999",
     )
 

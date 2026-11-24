@@ -39,7 +39,6 @@ async def fetch_defender_timeline_slice(
     max_events_per_slice: int = 250_000,
 ) -> SliceResult:
     machine_id, timeline_opts = templates.render_mde_timeline_params(
-        spec.template,
         spec.table_or_endpoint,
         spec.params,
     )

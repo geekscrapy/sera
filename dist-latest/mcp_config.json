@@ -1,14 +1,14 @@
 {
   "mcpServers": {
     "sera": {
-      "command": "/Users/matt/.gemini/antigravity/scratch/sera/.venv/bin/python",
+      "command": "/Users/matt/Documents/sera/.venv/bin/python",
       "args": [
         "-m",
         "sera.mcp_server.server"
       ],
       "env": {
         "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONPATH": "/Users/matt/.gemini/antigravity/scratch/sera/git/src"
+        "PYTHONPATH": "/Users/matt/Documents/sera/git/src"
       }
     }
   }

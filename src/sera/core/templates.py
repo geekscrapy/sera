@@ -1,27 +1,29 @@
-"""Allowlisted Parameterized Query Template Engine (zero regex blacklisting).
+"""Single canonical full-event query template per upstream API dialect (zero regex blacklisting).
 
-Every query in SERA is rendered from a registered, strongly-typed template that
-always retrieves full events without projection, aggregation, or row caps.
+Rather than maintaining multiple overlapping named templates per source, each `sub_source`
+has ONE canonical full-event query template. Passing `params={}` downloads every event in
+`[start_time, end_time)`; passing typed filter fields (`equals`, `in_list`, `contains`,
+`startswith`, or Purview/MDE native filter keys) safely renders server-side predicates while
+guaranteeing 100% full events with zero projection or summarization.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 
 FIELD_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_./-]{0,127}$")
 TABLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,127}$")
 MACHINE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
-PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+
+ARM_ALLOWED_FIELDS = frozenset({"caller", "resourceGroupName", "resourceType", "resourceId", "status"})
 
 
 class TemplateValidationError(ValueError):
-    """Raised when template name, field identifiers, or typed parameters are invalid."""
+    """Raised when field identifiers, table names, or typed template parameters are invalid."""
 
 
 def validate_field_ident(name: str) -> str:
@@ -82,7 +84,6 @@ def kql_literal(val: Any) -> str:
     if isinstance(val, float):
         return repr(val)
     if isinstance(val, str):
-        # KQL double-quoted string literals follow JSON string escaping rules.
         return json.dumps(val, ensure_ascii=False)
     raise TemplateValidationError(f"Unsupported KQL scalar parameter type: {type(val).__name__}")
 
@@ -97,287 +98,111 @@ def kql_dynamic_list(values: list[Any]) -> str:
 
 
 @dataclass(frozen=True)
-class QueryTemplateSpec:
-    """Metadata and schema definition for a registered query template."""
+class CanonicalTemplateSpec:
+    """Describes the single canonical query template and allowed `params` for a `sub_source`."""
 
-    name: str
-    dialect: str  # odata | purview | kql | mde_timeline | arm_odata
-    description: str
-    sub_sources: tuple[str, ...]
+    sub_source: str
+    dialect: str
+    template_preview: str
     param_schema: dict[str, str] = field(default_factory=dict)
-    custom_body: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "name": self.name,
+            "sub_source": self.sub_source,
             "dialect": self.dialect,
-            "description": self.description,
-            "sub_sources": list(self.sub_sources),
+            "template_preview": self.template_preview,
             "params": dict(self.param_schema),
-            "is_custom": self.custom_body is not None,
         }
 
 
-BUILTIN_TEMPLATES: tuple[QueryTemplateSpec, ...] = (
-    # Universal
-    QueryTemplateSpec(
-        name="all",
-        dialect="universal",
-        description="Download 100% of full events within [start_time, end_time) with no extra row filter.",
-        sub_sources=("entra", "purview_ual", "log_analytics", "defender_hunting", "defender_timeline", "arm_activity"),
-        param_schema={},
-    ),
-    QueryTemplateSpec(
-        name="structured_filter",
-        dialect="universal",
-        description=(
-            "Composable typed filter across any validated field names without raw query strings. "
-            "Supports `equals` (dict[field, scalar]), `in_list` (dict[field, list]), "
-            "`contains` (dict[field, str]), and `startswith` (dict[field, str])."
-        ),
-        sub_sources=("entra", "log_analytics", "defender_hunting", "arm_activity"),
+SURFACE_TEMPLATES: dict[str, CanonicalTemplateSpec] = {
+    "entra": CanonicalTemplateSpec(
+        sub_source="entra",
+        dialect="odata",
+        template_preview="$filter=(<time_field> ge <start> and <time_field> lt <end>)[ and (<typed_predicates>)]",
         param_schema={
             "equals": "optional dict[field_name, str|int|bool]",
-            "in_list": "optional dict[field_name, list[str|int]]",
+            "in_list": "optional dict[field_name, list[str|int]] (e.g. {'userPrincipalName': ['alice@contoso.com']})",
             "contains": "optional dict[field_name, str]",
             "startswith": "optional dict[field_name, str]",
         },
     ),
-    # Entra ID specific convenience templates
-    QueryTemplateSpec(
-        name="by_user",
-        dialect="odata",
-        description="Filter Entra events by one or more userPrincipalName or userId values.",
-        sub_sources=("entra",),
-        param_schema={
-            "users": "list[str] of UPNs (e.g. ['alice@contoso.com'])",
-            "field": "optional field override (default: 'userPrincipalName')",
-        },
-    ),
-    QueryTemplateSpec(
-        name="by_ip",
-        dialect="odata",
-        description="Filter Entra sign-ins / risk detections by one or more source IP addresses.",
-        sub_sources=("entra",),
-        param_schema={"ips": "list[str] of IPv4/IPv6 addresses"},
-    ),
-    QueryTemplateSpec(
-        name="by_app",
-        dialect="odata",
-        description="Filter Entra sign-ins by appId or appDisplayName.",
-        sub_sources=("entra",),
-        param_schema={
-            "app_ids": "optional list[str] of Entra appId GUIDs",
-            "app_names": "optional list[str] of appDisplayName strings",
-        },
-    ),
-    QueryTemplateSpec(
-        name="risky_only",
-        dialect="odata",
-        description="Filter Entra sign-ins or risk detections where riskLevelDuringSignIn / riskLevel is elevated.",
-        sub_sources=("entra",),
-        param_schema={"levels": "optional list[str] (default: ['low', 'medium', 'high'])"},
-    ),
-    # Purview UAL
-    QueryTemplateSpec(
-        name="ual_scope",
+    "purview_ual": CanonicalTemplateSpec(
+        sub_source="purview_ual",
         dialect="purview",
-        description="Scoped M365 Purview Unified Audit Log search using native server-side filter arrays.",
-        sub_sources=("purview_ual",),
+        template_preview="POST /security/auditLog/queries {filterStartDateTime, filterEndDateTime, ...optional filters}",
         param_schema={
             "users": "optional list[str] -> userPrincipalNameFilters",
             "ips": "optional list[str] -> ipAddressFilters",
             "operations": "optional list[str] -> operationFilters",
-            "services": "optional list[str] -> serviceFilters (e.g. ['Exchange', 'SharePoint', 'AzureActiveDirectory'])",
+            "services": "optional list[str] -> serviceFilters",
             "record_types": "optional list[str] -> recordTypeFilters",
             "object_ids": "optional list[str] -> objectIdFilters",
             "keyword": "optional str -> keywordFilter",
         },
     ),
-    # KQL (Log Analytics / Sentinel & Defender Hunting)
-    QueryTemplateSpec(
-        name="by_actor",
+    "log_analytics": CanonicalTemplateSpec(
+        sub_source="log_analytics",
         dialect="kql",
-        description="Filter a KQL table where an actor/account column matches one or more identities (case-insensitive).",
-        sub_sources=("log_analytics", "defender_hunting"),
+        template_preview='table("<table_name>") | where TimeGenerated >= datetime(<start>) and TimeGenerated < datetime(<end>) [| where ...]',
         param_schema={
-            "actors": "list[str] of UPNs / account names",
-            "column": "optional str column name (default: 'UserPrincipalName')",
+            "equals": "optional dict[column, str|int|bool]",
+            "in_list": "optional dict[column, list[str|int]] (case-insensitive `in~` for strings)",
+            "contains": "optional dict[column, str]",
+            "startswith": "optional dict[column, str]",
         },
     ),
-    QueryTemplateSpec(
-        name="by_host",
+    "defender_hunting": CanonicalTemplateSpec(
+        sub_source="defender_hunting",
         dialect="kql",
-        description="Filter a KQL table by one or more host/device names or DeviceId values (case-insensitive).",
-        sub_sources=("log_analytics", "defender_hunting"),
+        template_preview='table("<table_name>") | where Timestamp >= datetime(<start>) and Timestamp < datetime(<end>) [| where ...]',
         param_schema={
-            "hosts": "list[str] of hostnames or device IDs",
-            "column": "optional str column name (default: 'DeviceName')",
+            "equals": "optional dict[column, str|int|bool]",
+            "in_list": "optional dict[column, list[str|int]] (case-insensitive `in~` for strings)",
+            "contains": "optional dict[column, str]",
+            "startswith": "optional dict[column, str]",
         },
     ),
-    QueryTemplateSpec(
-        name="by_ip_kql",
-        dialect="kql",
-        description="Filter a KQL table by one or more IP addresses on a specified IP column.",
-        sub_sources=("log_analytics", "defender_hunting"),
-        param_schema={
-            "ips": "list[str] of IP addresses",
-            "column": "optional str column name (default: 'IPAddress')",
-        },
-    ),
-    # MDE 180-Day Host Timeline
-    QueryTemplateSpec(
-        name="machine_timeline",
+    "defender_timeline": CanonicalTemplateSpec(
+        sub_source="defender_timeline",
         dialect="mde_timeline",
-        description="Download 180-day MDE host timeline events for a machine_id (`table_or_endpoint`), optionally scoped by action_types or search_text.",
-        sub_sources=("defender_timeline",),
+        template_preview="GET /apiproxy/mtp/mdeTimelineExperience/machines/<machine_id>/events?fromDate=<start>&toDate=<end>",
         param_schema={
             "action_types": "optional list[str] of MDE ActionType names",
             "search_text": "optional str server-side search filter",
         },
     ),
-    # Azure ARM Activity Logs
-    QueryTemplateSpec(
-        name="by_caller",
+    "arm_activity": CanonicalTemplateSpec(
+        sub_source="arm_activity",
         dialect="arm_odata",
-        description="Filter Azure Subscription ARM Activity Logs by caller UPN / service principal objectId.",
-        sub_sources=("arm_activity",),
-        param_schema={"caller": "str UPN or objectId"},
+        template_preview="$filter=eventTimestamp ge '<start>' and eventTimestamp le '<end>'[ and <field> eq '<val>']",
+        param_schema={
+            "equals": "optional dict[caller|resourceGroupName|resourceType|resourceId|status, str]",
+        },
     ),
-    QueryTemplateSpec(
-        name="by_resource_group",
-        dialect="arm_odata",
-        description="Filter Azure Subscription ARM Activity Logs by resourceGroupName.",
-        sub_sources=("arm_activity",),
-        param_schema={"resource_group": "str resourceGroupName"},
-    ),
-    QueryTemplateSpec(
-        name="by_resource_type",
-        dialect="arm_odata",
-        description="Filter Azure Subscription ARM Activity Logs by resourceProvider / resourceType.",
-        sub_sources=("arm_activity",),
-        param_schema={"resource_type": "str (e.g. 'Microsoft.Compute/virtualMachines')"},
-    ),
-)
-
-
-ARM_ALLOWED_FIELDS = frozenset({"caller", "resourceGroupName", "resourceType", "resourceId", "status"})
+}
 
 
 class TemplateRegistry:
-    """Manages built-in and workspace-custom (`<workspace>/.sera/templates/*.toml`) templates."""
-
-    def __init__(self, custom_templates_dir: Path | None = None) -> None:
-        self._templates: dict[str, QueryTemplateSpec] = {t.name: t for t in BUILTIN_TEMPLATES}
-        if custom_templates_dir and custom_templates_dir.exists():
-            self._load_custom_templates(custom_templates_dir)
-
-    def _load_custom_templates(self, directory: Path) -> None:
-        for toml_file in sorted(directory.glob("*.toml")):
-            data = tomllib.loads(toml_file.read_text(encoding="utf-8"))
-            name = str(data["name"]).strip()
-            dialect = str(data["dialect"]).strip()
-            if dialect not in {"odata", "kql", "arm_odata"}:
-                raise TemplateValidationError(
-                    f"Custom template '{name}' in {toml_file.name} has unsupported dialect '{dialect}'"
-                )
-            body = str(data["predicate_template"]).strip()
-            # Ensure custom predicate templates cannot smuggle KQL pipe operators or OData query options
-            if dialect == "kql" and "|" in _strip_quoted(body):
-                raise TemplateValidationError(
-                    f"Custom KQL predicate template '{name}' cannot contain pipe ('|') operators; "
-                    "SERA automatically wraps predicates inside full-row `where (...)` clauses."
-                )
-            if dialect in {"odata", "arm_odata"} and any(tok in body for tok in ("$select", "$top", "&")):
-                raise TemplateValidationError(
-                    f"Custom OData predicate template '{name}' cannot contain '$select', '$top', or '&'."
-                )
-            self._templates[name] = QueryTemplateSpec(
-                name=name,
-                dialect=dialect,
-                description=str(data.get("description", f"Custom {dialect} predicate template")),
-                sub_sources=tuple(data.get("sub_sources", [])),
-                param_schema={str(k): str(v) for k, v in data.get("params", {}).items()},
-                custom_body=body,
-            )
+    """Renders the single canonical full-event query template for each `sub_source`."""
 
     def list_templates(self, sub_source: str = "") -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for spec in self._templates.values():
-            if sub_source and sub_source not in spec.sub_sources:
-                continue
-            out.append(spec.to_dict())
-        return out
+        if sub_source:
+            if sub_source not in SURFACE_TEMPLATES:
+                raise TemplateValidationError(f"Unknown sub_source '{sub_source}'")
+            return [SURFACE_TEMPLATES[sub_source].to_dict()]
+        return [spec.to_dict() for spec in SURFACE_TEMPLATES.values()]
 
-    def get_for_sub_source(self, template_name: str, sub_source: str) -> QueryTemplateSpec:
-        if template_name not in self._templates:
-            valid = ", ".join(sorted(self._templates))
-            raise TemplateValidationError(
-                f"Unknown query template '{template_name}'. Available templates: {valid}"
-            )
-        spec = self._templates[template_name]
-        if spec.sub_sources and sub_source not in spec.sub_sources:
-            raise TemplateValidationError(
-                f"Template '{template_name}' is not valid for sub_source '{sub_source}' "
-                f"(supported: {', '.join(spec.sub_sources)})"
-            )
-        return spec
-
-    def render_odata_predicate(self, template_name: str, sub_source: str, params: dict[str, Any]) -> str:
-        """Render a pure OData boolean predicate (without time bounds, which the connector prepends)."""
-        spec = self.get_for_sub_source(template_name, sub_source)
-        if spec.custom_body is not None:
-            return self._render_custom_body(spec, params, literal_fn=odata_literal, list_fn=None)
-
-        if template_name == "all":
-            _require_empty_params(template_name, params)
+    def render_odata_predicate(self, sub_source: str, params: dict[str, Any]) -> str:
+        """Render optional OData predicate (`params={}` -> `""` -> all events in slice)."""
+        if not params:
             return ""
-        if template_name == "by_user":
-            users = _require_non_empty_str_list(params, "users")
-            field_name = validate_field_ident(str(params.get("field", "userPrincipalName")))
-            return odata_in_list(field_name, users)
-        if template_name == "by_ip":
-            ips = _require_non_empty_str_list(params, "ips")
-            return odata_in_list("ipAddress", ips)
-        if template_name == "by_app":
-            clauses: list[str] = []
-            if params.get("app_ids"):
-                clauses.append(odata_in_list("appId", _require_non_empty_str_list(params, "app_ids")))
-            if params.get("app_names"):
-                clauses.append(
-                    odata_in_list("appDisplayName", _require_non_empty_str_list(params, "app_names"))
-                )
-            if not clauses:
-                raise TemplateValidationError("Template 'by_app' requires 'app_ids' and/or 'app_names'")
-            return "(" + " or ".join(clauses) + ")"
-        if template_name == "risky_only":
-            levels = params.get("levels") or ["low", "medium", "high"]
-            if not isinstance(levels, list) or not levels:
-                raise TemplateValidationError("'levels' must be a non-empty list of strings")
-            return odata_in_list("riskLevel", [str(x) for x in levels])
-        if template_name == "by_caller":
-            caller = _require_str(params, "caller")
-            return f"caller eq {odata_literal(caller)}"
-        if template_name == "by_resource_group":
-            rg = _require_str(params, "resource_group")
-            return f"resourceGroupName eq {odata_literal(rg)}"
-        if template_name == "by_resource_type":
-            rt = _require_str(params, "resource_type")
-            return f"resourceType eq {odata_literal(rt)}"
-        if template_name == "structured_filter":
-            return _render_structured_odata(params, arm_mode=(sub_source == "arm_activity"))
+        return _render_structured_odata(params, arm_mode=(sub_source == "arm_activity"))
 
-        raise TemplateValidationError(f"Template '{template_name}' cannot render OData for '{sub_source}'")
-
-    def render_purview_filters(self, template_name: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Render validated Purview Graph `auditLogQuery` filter payload properties."""
-        self.get_for_sub_source(template_name, "purview_ual")
-        if template_name == "all":
-            _require_empty_params(template_name, params)
+    def render_purview_filters(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Render optional Purview Graph `auditLogQuery` filter payload (`params={}` -> `{}`)."""
+        if not params:
             return {}
-        if template_name != "ual_scope":
-            raise TemplateValidationError(f"Unsupported Purview template '{template_name}'")
-
         mapping = {
             "users": "userPrincipalNameFilters",
             "ips": "ipAddressFilters",
@@ -390,20 +215,18 @@ class TemplateRegistry:
         unknown = set(params) - allowed_keys
         if unknown:
             raise TemplateValidationError(
-                f"Unknown parameter(s) for 'ual_scope': {', '.join(sorted(unknown))}"
+                f"Unknown Purview UAL filter parameter(s): {', '.join(sorted(unknown))}"
             )
         payload: dict[str, Any] = {}
         for param_key, api_key in mapping.items():
             if param_key in params and params[param_key] is not None:
-                vals = _require_non_empty_str_list(params, param_key)
-                payload[api_key] = vals
+                payload[api_key] = _require_non_empty_str_list(params, param_key)
         if params.get("keyword"):
             payload["keywordFilter"] = _require_str(params, "keyword")
         return payload
 
     def render_kql_query(
         self,
-        template_name: str,
         sub_source: str,
         table_name: str,
         time_column: str,
@@ -412,8 +235,9 @@ class TemplateRegistry:
         params: dict[str, Any],
         include_item_id: bool = False,
     ) -> str:
-        """Render a complete, guaranteed full-row KQL query with zero projection/aggregation."""
-        spec = self.get_for_sub_source(template_name, sub_source)
+        """Render the single canonical full-row KQL query for `table_name`."""
+        if sub_source not in {"log_analytics", "defender_hunting"}:
+            raise TemplateValidationError(f"Unsupported KQL sub_source '{sub_source}'")
         safe_table = validate_table_ident(table_name)
         safe_time_col = validate_field_ident(time_column)
 
@@ -421,54 +245,26 @@ class TemplateRegistry:
             f"table({kql_literal(safe_table)})",
             f"| where {safe_time_col} >= datetime({kql_literal(start_iso)}) and {safe_time_col} < datetime({kql_literal(end_iso)})",
         ]
-
-        if spec.custom_body is not None:
-            pred = self._render_custom_body(spec, params, literal_fn=kql_literal, list_fn=kql_dynamic_list)
-            lines.append(f"| where ({pred})")
-        elif template_name == "all":
-            _require_empty_params(template_name, params)
-        elif template_name == "by_actor":
-            actors = _require_non_empty_str_list(params, "actors")
-            col = validate_field_ident(str(params.get("column", "UserPrincipalName")))
-            lines.append(f"| where {col} in~ ({kql_dynamic_list(actors)})")
-        elif template_name == "by_host":
-            hosts = _require_non_empty_str_list(params, "hosts")
-            col = validate_field_ident(str(params.get("column", "DeviceName")))
-            lines.append(f"| where {col} in~ ({kql_dynamic_list(hosts)})")
-        elif template_name == "by_ip_kql":
-            ips = _require_non_empty_str_list(params, "ips")
-            col = validate_field_ident(str(params.get("column", "IPAddress")))
-            lines.append(f"| where {col} in ({kql_dynamic_list(ips)})")
-        elif template_name == "structured_filter":
+        if params:
             lines.extend(_render_structured_kql_clauses(params))
-        else:
-            raise TemplateValidationError(f"Unsupported KQL template '{template_name}'")
-
         if include_item_id:
             lines.append('| extend _sera_item_id = tostring(column_ifexists("_ItemId", ""))')
-
         return "\n".join(lines)
 
     def render_mde_timeline_params(
         self,
-        template_name: str,
         machine_id: str,
         params: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
-        """Validate machine_id and optional MDE host timeline filter parameters."""
-        self.get_for_sub_source(template_name, "defender_timeline")
+        """Validate `machine_id` and optional MDE host timeline filter parameters."""
         safe_machine = validate_machine_id(machine_id)
-        if template_name == "all":
-            _require_empty_params(template_name, params)
+        if not params:
             return safe_machine, {}
-        if template_name != "machine_timeline":
-            raise TemplateValidationError(f"Unsupported MDE timeline template '{template_name}'")
-
         allowed = {"action_types", "search_text"}
         unknown = set(params) - allowed
         if unknown:
             raise TemplateValidationError(
-                f"Unknown parameter(s) for 'machine_timeline': {', '.join(sorted(unknown))}"
+                f"Unknown MDE timeline parameter(s): {', '.join(sorted(unknown))}"
             )
         out: dict[str, Any] = {}
         if params.get("action_types"):
@@ -476,44 +272,6 @@ class TemplateRegistry:
         if params.get("search_text"):
             out["search_text"] = _require_str(params, "search_text")
         return safe_machine, out
-
-    @staticmethod
-    def _render_custom_body(
-        spec: QueryTemplateSpec,
-        params: dict[str, Any],
-        literal_fn: Any,
-        list_fn: Any,
-    ) -> str:
-        assert spec.custom_body is not None
-        placeholders = set(PLACEHOLDER_RE.findall(spec.custom_body))
-        missing = placeholders - set(params)
-        if missing:
-            raise TemplateValidationError(
-                f"Missing required parameter(s) for custom template '{spec.name}': {', '.join(sorted(missing))}"
-            )
-
-        def _replace(match: re.Match[str]) -> str:
-            key = match.group(1)
-            val = params[key]
-            if isinstance(val, list):
-                if list_fn is None:
-                    return "(" + ", ".join(literal_fn(x) for x in val) + ")"
-                return list_fn(val)
-            return literal_fn(val)
-
-        return PLACEHOLDER_RE.sub(_replace, spec.custom_body)
-
-
-def _strip_quoted(text: str) -> str:
-    """Strip single- and double-quoted string literals to inspect structural characters safely."""
-    return re.sub(r"""('([^'\\]|\\.)*'|"([^"\\]|\\.)*")""", "''", text)
-
-
-def _require_empty_params(template_name: str, params: dict[str, Any]) -> None:
-    if params:
-        raise TemplateValidationError(
-            f"Template '{template_name}' does not accept parameters (got: {', '.join(sorted(params))})"
-        )
 
 
 def _require_str(params: dict[str, Any], key: str) -> str:
@@ -535,7 +293,7 @@ def _render_structured_odata(params: dict[str, Any], arm_mode: bool = False) -> 
     unknown = set(params) - allowed
     if unknown:
         raise TemplateValidationError(
-            f"Unsupported structured_filter key(s): {', '.join(sorted(unknown))}"
+            f"Unsupported OData filter key(s): {', '.join(sorted(unknown))} (expected: {sorted(allowed)})"
         )
     clauses: list[str] = []
 
@@ -572,8 +330,6 @@ def _render_structured_odata(params: dict[str, Any], arm_mode: bool = False) -> 
             raise TemplateValidationError(f"'startswith.{field_name}' must be a non-empty string")
         clauses.append(f"startswith({ident}, {odata_literal(prefix)})")
 
-    if not clauses:
-        raise TemplateValidationError("structured_filter requires at least one non-empty predicate")
     return " and ".join(clauses)
 
 
@@ -582,7 +338,7 @@ def _render_structured_kql_clauses(params: dict[str, Any]) -> list[str]:
     unknown = set(params) - allowed
     if unknown:
         raise TemplateValidationError(
-            f"Unsupported structured_filter key(s): {', '.join(sorted(unknown))}"
+            f"Unsupported KQL filter key(s): {', '.join(sorted(unknown))} (expected: {sorted(allowed)})"
         )
     lines: list[str] = []
     for field_name, val in (params.get("equals") or {}).items():
@@ -603,15 +359,9 @@ def _render_structured_kql_clauses(params: dict[str, Any]) -> list[str]:
         lines.append(f"| where tostring({ident}) contains {kql_literal(sub)}")
 
     for field_name, prefix in (params.get("startswith") or {}).items():
-        ident = _chk_ident_kql(field_name)
+        ident = validate_field_ident(field_name)
         if not isinstance(prefix, str) or not prefix:
             raise TemplateValidationError(f"'startswith.{field_name}' must be a non-empty string")
         lines.append(f"| where tostring({ident}) startswith {kql_literal(prefix)}")
 
-    if not lines:
-        raise TemplateValidationError("structured_filter requires at least one non-empty predicate")
     return lines
-
-
-def _chk_ident_kql(field_name: str) -> str:
-    return validate_field_ident(field_name)

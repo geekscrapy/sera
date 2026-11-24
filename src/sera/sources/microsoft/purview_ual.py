@@ -49,7 +49,7 @@ async def fetch_purview_ual_slice(
     sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> SliceResult:
     validate_purview_endpoint(spec.table_or_endpoint)
-    filter_body = templates.render_purview_filters(spec.template, spec.params)
+    filter_body = templates.render_purview_filters(spec.params)
     start_iso = format_utc_iso(slice_start)
     end_iso = format_utc_iso(slice_end)
 

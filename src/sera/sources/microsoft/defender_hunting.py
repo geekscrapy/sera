@@ -44,7 +44,6 @@ async def fetch_defender_hunting_slice(
     start_iso = format_utc_iso(slice_start)
     end_iso = format_utc_iso(slice_end)
     kql = templates.render_kql_query(
-        template_name=spec.template,
         sub_source="defender_hunting",
         table_name=spec.table_or_endpoint,
         time_column=time_column,

@@ -361,19 +361,17 @@ def cmd_templates(
         sys.stdout.write(json.dumps(items, indent=2) + "\n")
         return
 
-    tbl = Table(title="SERA Allowlisted Query Templates")
-    tbl.add_column("Template", style="cyan", no_wrap=True)
+    tbl = Table(title="SERA Canonical Query Template Per Sub-Source")
+    tbl.add_column("Sub-Source", style="cyan", no_wrap=True)
     tbl.add_column("Dialect", style="magenta")
-    tbl.add_column("Sub-Sources")
-    tbl.add_column("Parameters")
-    tbl.add_column("Description")
+    tbl.add_column("Allowed Filter Params")
+    tbl.add_column("Canonical Full-Event Template")
     for item in items:
         tbl.add_row(
-            item["name"],
+            item["sub_source"],
             item["dialect"],
-            ", ".join(item["sub_sources"]),
             json.dumps(item["params"]) if item["params"] else "{}",
-            item["description"],
+            item["template_preview"],
         )
     console.print(tbl)
 
@@ -385,8 +383,7 @@ def cmd_collect(
     target: str = typer.Option(..., "--target", "--table", help="Endpoint, table name, or MDE machine_id"),
     start_time: str = typer.Option(..., "--start", help="UTC start ISO-8601 timestamp"),
     end_time: str = typer.Option(..., "--end", help="UTC end ISO-8601 timestamp"),
-    template: str = typer.Option("all", "--template", "-t", help="Allowlisted template name"),
-    params_json: str = typer.Option("{}", "--params", help="JSON object of template parameters"),
+    params_json: str = typer.Option("{}", "--params", help="Optional JSON object of typed filter parameters"),
     profile: str = typer.Option("default", "--profile", "-p", help="Auth profile name"),
     target_id: str = typer.Option("", "--target-id", help="Workspace GUID (LAW) or Subscription GUID (ARM)"),
     destination: str = typer.Option("", "--destination", "-d", help="Destination override name"),
@@ -408,7 +405,7 @@ def cmd_collect(
         table_or_endpoint=target.strip(),
         start_time=start_time.strip(),
         end_time=end_time.strip(),
-        template=template.strip(),
+        template="canonical",
         params=params,
         profile=profile.strip(),
         target_id=target_id.strip(),

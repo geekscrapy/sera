@@ -21,7 +21,7 @@ SERA_RULE_MD = """# SERA — Secure Extraction for Response Agents (`sera.md`)
 When acquiring raw telemetry or forensic logs for an engagement:
 
 1. **Use SERA Exclusively for Log Acquisition**: Submit downloads through SERA's MCP tools (`submit_job`, `check_jobs`, `resume_job`, `list_sources`, `list_destinations`, `list_templates`) or guide the analyst to use the `sera` CLI.
-2. **Templated Full-Event Extraction Only**: SERA enforces allowlisted query templates (`all`, `structured_filter`, `by_user`, `by_ip`, `ual_scope`, `by_actor`, `by_host`, `machine_timeline`, etc.) so 100% of every event is preserved verbatim without summarization or field projection. Schema sampling is intentionally disabled.
+2. **Single Canonical Full-Event Template**: Each `sub_source` uses one fixed canonical full-event template (accepting optional typed filter `params`) so 100% of every event is preserved verbatim without summarization or field projection. Schema sampling is intentionally disabled.
 3. **Never Access `.sera/` Directly**: `<workspace>/.sera/` holds engagement credentials, the `sera.sqlite` ledger, and `AES-256-GCM` encrypted spool chunks. Never attempt to read, modify, or delete `.sera/` via file or shell tools.
 4. **Never Ask for Secrets in Chat**: Authentication (MSAL Service Principal, Interactive/Device-Code, or MDE Portal Session cookies) must always be configured out-of-band by the analyst via `sera auth add ...`.
 5. **Concise User Communication**: Give the user crisp summaries and exact next-step setup commands; handle template selection, typed parameter construction, and job tracking under the hood.
@@ -81,28 +81,29 @@ Every runtime capability works in both MCP and the `sera` CLI (only `init` and `
 | Track / summarize | `check_jobs(job_id="", include_slices=False)` | `sera jobs` / `sera status <job_id>` | Instant read from `sera.sqlite`. Reports `status`, `events_fetched`, `events_uploaded`, `events_already_uploaded_skipped`, and slice progress. |
 | Resume failed/killed | `resume_job(job_id)` | `sera resume <job_id>` | Resets only uncommitted (`in_progress`/`failed`) slices to `pending` and skips any events already in `uploaded_events`. |
 
-### Supported `microsoft` Sub-Sources & `table_or_endpoint` Targets
+### Supported `microsoft` Sub-Sources & Canonical Template `params`
+Each `sub_source` uses **one canonical full-event query template** (`params={}` pulls 100% of events in `[start_time, end_time)`; optional typed `params` apply server-side filters):
+
 1. **`entra`** (MS Graph OData; requires MSAL profile; default 24h slices):
    - `table_or_endpoint`: `signIns` | `directoryAudits` | `provisioning` | `riskDetections`
-   - Templates: `all`, `by_user` (`users`, optional `field`), `by_ip` (`ips`), `by_app` (`app_ids`, `app_names`), `risky_only` (`levels`), `structured_filter`
+   - Optional `params`: `equals`, `in_list`, `contains`, `startswith`
 2. **`purview_ual`** (MS Graph async `/beta/security/auditLog/queries`; requires MSAL `AuditLogsQuery.Read.All`; bisects near 1M cap):
    - `table_or_endpoint`: `auditLogRecords`
-   - Templates: `all`, `ual_scope` (`users`, `ips`, `operations`, `services`, `record_types`, `object_ids`, `keyword`)
+   - Optional `params`: `users`, `ips`, `operations`, `services`, `record_types`, `object_ids`, `keyword`
 3. **`log_analytics`** (Azure Monitor / Sentinel KQL; requires `target_id` = Workspace GUID or `default_workspace_id` in `.sera/config.toml`; bisects on `PartialError` / 500k cap):
    - `table_or_endpoint`: Exact table name (e.g. `SigninLogs`, `AuditLogs`, `AzureActivity`, `SecurityEvent`, `Syslog`, `CommonSecurityLog`)
-   - Templates: `all`, `by_actor` (`actors`, optional `column`), `by_host` (`hosts`, optional `column`), `by_ip_kql` (`ips`, optional `column`), `structured_filter`
+   - Optional `params`: `equals`, `in_list`, `contains`, `startswith`
 4. **`defender_hunting`** (Defender XDR 30-day KQL `/v1.0/security/runHuntingQuery`; bisects at 100k row ceiling):
    - `table_or_endpoint`: Exact XDR table (e.g. `DeviceProcessEvents`, `DeviceNetworkEvents`, `DeviceFileEvents`, `EmailEvents`, `IdentityLogonEvents`)
-   - Templates: `all`, `by_actor`, `by_host`, `by_ip_kql`, `structured_filter`
+   - Optional `params`: `equals`, `in_list`, `contains`, `startswith`
 5. **`defender_timeline`** (MDE **180-Day Host Timeline** via `security.microsoft.com`; requires `microsoft-portal` profile with `sccauth` Cookie + `X-XSRF-TOKEN`; default 7d slices):
    - `table_or_endpoint`: Target host's MDE `machine_id` (40-hex DeviceId)
-   - Templates: `all`, `machine_timeline` (optional `action_types`, `search_text`)
+   - Optional `params`: `action_types`, `search_text`
 6. **`arm_activity`** (Azure Subscription Activity Logs, 90d lookback; requires `target_id` = Subscription GUID or `default_subscription_id` in `.sera/config.toml`):
    - `table_or_endpoint`: `management`
-   - Templates: `all`, `by_caller` (`caller`), `by_resource_group` (`resource_group`), `by_resource_type` (`resource_type`), `structured_filter` (`equals` on `caller`, `resourceGroupName`, `resourceType`, `resourceId`, `status`)
+   - Optional `params`: `equals` on `caller`, `resourceGroupName`, `resourceType`, `resourceId`, `status`
 
-### Composable `structured_filter` Parameter Reference
-When none of the shorthand templates fit, pass `template="structured_filter"` with any combination of:
+### Filter `params` Reference (`entra`, `log_analytics`, `defender_hunting`, `arm_activity`)
 ```json
 {
   "equals": {"userPrincipalName": "alice@contoso.com"},
@@ -126,7 +127,7 @@ Antigravity plugin providing tamper-proof, template-driven DFIR telemetry acquis
 ## Testing via Symlink
 Link `dist-latest` directly into your global Antigravity plugins directory:
 ```bash
-ln -s /Users/matt/.gemini/antigravity/scratch/sera/git/dist-latest ~/.gemini/config/plugins/sera
+ln -s /Users/matt/Documents/sera/git/dist-latest ~/.gemini/config/plugins/sera
 ```
 """
 

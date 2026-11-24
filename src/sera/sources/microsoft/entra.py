@@ -48,7 +48,7 @@ async def fetch_entra_slice(
     max_events_per_slice: int = 500_000,
 ) -> SliceResult:
     url, time_field = validate_entra_endpoint(spec.table_or_endpoint)
-    extra_pred = templates.render_odata_predicate(spec.template, "entra", spec.params)
+    extra_pred = templates.render_odata_predicate("entra", spec.params)
     start_iso = format_utc_iso(slice_start)
     end_iso = format_utc_iso(slice_end)
 

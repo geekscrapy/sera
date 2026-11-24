@@ -72,7 +72,7 @@ def initialize_workspace(
     """Initialize `<workspace>/.sera/` (`config.toml`, `sera.sqlite`, `creds/`, `spool/`, `templates/`)."""
     ws = workspace_dir.resolve()
     sdir = sera_dir_for_workspace(ws)
-    for sub in ("creds", "spool", "templates"):
+    for sub in ("creds", "spool"):
         (sdir / sub).mkdir(parents=True, exist_ok=True)
 
     opts = dict(destination_options or {})
@@ -142,7 +142,7 @@ class SeraService:
         self.config = load_workspace_config(self.workspace_dir)
         self.db = SeraDatabase(self.sera_dir / "sera.sqlite")
         self.spool = EphemeralSpoolManager(self.sera_dir / "spool")
-        self.templates = TemplateRegistry(self.sera_dir / "templates")
+        self.templates = TemplateRegistry()
 
         self.sources = source_registry or SourceRegistry()
         if "microsoft" not in self.sources.names():
@@ -159,7 +159,6 @@ class SeraService:
 
     def reload_config(self) -> None:
         self.config = load_workspace_config(self.workspace_dir)
-        self.templates = TemplateRegistry(self.sera_dir / "templates")
 
     def get_connector(self, source_name: str) -> BaseSourceConnector:
         if self._connector_override is not None:
