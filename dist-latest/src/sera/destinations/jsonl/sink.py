@@ -31,8 +31,8 @@ class JsonlDirectoryDestination(BaseDestinationSink):
             ),
         )
 
-    def __init__(self, dest_config: DestinationConfig) -> None:
-        super().__init__(dest_config)
+    def __init__(self, dest_config: DestinationConfig, workspace_dir: Path | None = None) -> None:
+        super().__init__(dest_config, workspace_dir=workspace_dir)
         opts = self.apply_defaults(dest_config.options)
         raw_dir = str(opts.get("output_dir", "")).strip()
         if not raw_dir:

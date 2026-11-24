@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import os
+from pathlib import Path
 from typing import Any, Callable
 
 from google.cloud import bigquery
@@ -13,6 +14,7 @@ from google.cloud import bigquery
 from sera.config import DestinationConfig
 from sera.core.models import JobRecord, utc_now_iso
 from sera.destinations.base import BaseDestinationSink, SinkOptionSpec
+from sera.sources.base import AuthModeSpec
 
 
 EVENTS_SCHEMA: tuple[bigquery.SchemaField, ...] = (
@@ -73,12 +75,23 @@ class BigQueryDestination(BaseDestinationSink):
             ),
         )
 
+    @classmethod
+    def auth_modes(cls) -> dict[str, AuthModeSpec]:
+        return {
+            "adc": AuthModeSpec(
+                mode="adc",
+                description="Ambient Google Cloud Application Default Credentials (ADC) & environment project",
+                fields=(),
+            )
+        }
+
     def __init__(
         self,
         dest_config: DestinationConfig,
         client_factory: Callable[[], bigquery.Client] | None = None,
+        workspace_dir: Path | None = None,
     ) -> None:
-        super().__init__(dest_config)
+        super().__init__(dest_config, workspace_dir=workspace_dir)
         opts = self.apply_defaults(dest_config.options)
         self.dataset_id = str(opts.get("dataset_id", "sera")).strip()
         self.events_table = str(opts.get("events_table", "events")).strip()

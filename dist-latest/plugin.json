@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Forensic-grade DFIR log extraction engine: downloads full unsummarized events via canonical query templates into configured destination sinks with cryptographic spool verification.",
   "suggestedPrompts": [
-    "What does SERA do and how do I set it up for this engagement?",
+    "What does SERA do and how do I set it up in my .venv for this engagement?",
     "Show available SERA telemetry sources, templates, and configured destinations",
     "Check status and uploaded event counts for active SERA collection jobs"
   ]

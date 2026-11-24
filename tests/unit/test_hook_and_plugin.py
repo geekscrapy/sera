@@ -118,11 +118,14 @@ def test_plugin_packager_produces_self_contained_local_uvx_plugin_and_skill_reso
     assert hook_cmd == "python3 -B ./hooks/pre_tool_guard.py"
 
     assert (dist_latest / "rules" / "sera.md").is_file()
+    readme_text = (dist_latest / "README.md").read_text(encoding="utf-8")
     skill_text = (dist_latest / "skills" / "sera" / "SKILL.md").read_text(encoding="utf-8")
-    assert "Init Setup" in skill_text
-    assert "Auth" in skill_text
-    assert "Downloading" in skill_text
-    assert "Uploading" in skill_text
+    assert "sera init" in skill_text
+    assert "sera source add" in skill_text
+    assert "sera dest add" in skill_text
+    assert "uv pip install" in skill_text
+    assert "uv pip install" in readme_text
+    assert "uv tool install" not in readme_text
     assert "Agent-Only Technical Reference" in skill_text
 
     # Verify SKILL.md holds zero vendor/sink specifics and delegates to skills/sera/resources/

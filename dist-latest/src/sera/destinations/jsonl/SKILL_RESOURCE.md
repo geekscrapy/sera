@@ -1,15 +1,15 @@
 # JSONL Directory Destination Plugin (`type="jsonl"`)
 
-## Initialization
+## Adding the Destination (`sera dest add jsonl`)
 Writes verified `NEWLINE_DELIMITED_JSON` batches and job manifests to an external local or mounted forensic directory (outside `.sera/`):
 
 ```bash
-sera init --dest-type jsonl --dest-opt output_dir=/cases/engagement/exports
+sera dest add jsonl --opt output_dir=/cases/engagement/exports
 ```
 
-## Options (`--dest-opt KEY=VALUE`)
+## Options (`--opt KEY=VALUE`) & Auth (`--auth-mode none`)
 | Option | Required | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `output_dir` | Yes | — | Target directory for exported NDJSON event batches |
-| `events_subdir` | No | `events` | Subdirectory under `output_dir` partitioned by `<source>/<sub_source>/<job_id>/` |
+| `output_dir` | Yes | — | Target file directory for exported NDJSON event batches |
+| `events_subdir` | No | `events` | Subdirectory under `output_dir` partitioned by `<source>/<sub_source>/` |
 | `jobs_filename` | No | `collection_jobs.jsonl` | Job audit manifest filename inside `output_dir` |

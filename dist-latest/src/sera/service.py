@@ -8,6 +8,7 @@ dynamically via `SourceRegistry` and `DestinationRegistry`.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from sera import CORE_UV_PACKAGES
 from sera.config import (
     DestinationConfig,
     NetworkConfig,
+    SourceProfileConfig,
     WorkspaceConfig,
     load_workspace_config,
     save_workspace_config,
@@ -43,15 +45,28 @@ def collect_required_uv_packages(
     return sorted(combined)
 
 
+def resolve_target_venv_python(workspace_dir: Path) -> str:
+    """Resolve the Python interpreter of the currently defined `.venv` (never requiring global install)."""
+    active_venv = os.environ.get("VIRTUAL_ENV", "").strip()
+    if active_venv:
+        active_py = Path(active_venv).expanduser() / "bin" / "python"
+        if active_py.exists():
+            return str(active_py)
+    for candidate_root in (workspace_dir, workspace_dir.parent):
+        candidate_py = candidate_root / ".venv" / "bin" / "python"
+        if candidate_py.exists():
+            return str(candidate_py)
+    return sys.executable
+
+
 def ensure_uv_dependencies(
     workspace_dir: Path,
     sources: SourceRegistry | None = None,
     destinations: DestinationRegistry | None = None,
 ) -> dict[str, Any]:
-    """Ensure all upfront core and plugin libraries are installed into `.venv` via `uv`."""
+    """Ensure all upfront core and plugin libraries are installed into the active `.venv` via `uv`."""
     uv_bin = shutil.which("uv")
-    local_venv_py = workspace_dir / ".venv" / "bin" / "python"
-    target_python = str(local_venv_py) if local_venv_py.exists() else sys.executable
+    target_python = resolve_target_venv_python(workspace_dir)
     packages = collect_required_uv_packages(sources, destinations)
 
     if not uv_bin:
@@ -78,7 +93,7 @@ def ensure_uv_dependencies(
 def initialize_workspace(
     workspace_dir: Path,
     *,
-    destination_type: str,
+    destination_type: str = "",
     destination_name: str = "default",
     destination_options: dict[str, Any] | None = None,
     source_defaults: dict[str, dict[str, Any]] | None = None,
@@ -87,7 +102,7 @@ def initialize_workspace(
     source_registry: SourceRegistry | None = None,
     destination_registry: DestinationRegistry | None = None,
 ) -> dict[str, Any]:
-    """Initialize `<workspace>/.sera/` using plugin-supplied defaults and validate destination configuration."""
+    """Initialize `<workspace>/.sera/` (`config.toml`, `sera.sqlite`, `creds/`, `spool/`) and sync `.venv` deps."""
     ws = workspace_dir.resolve()
     sdir = sera_dir_for_workspace(ws)
     for sub in ("creds", "spool"):
@@ -95,26 +110,32 @@ def initialize_workspace(
 
     src_reg = source_registry or SourceRegistry()
     dst_reg = destination_registry or DestinationRegistry()
-    sink_cls = dst_reg.get_class(destination_type)
-    normalized_opts = sink_cls.apply_defaults(dict(destination_options or {}))
 
-    dest_cfg = DestinationConfig(
-        name=destination_name,
-        type=destination_type,
-        options=normalized_opts,
-    )
-    net_cfg = NetworkConfig()
-    # Validate options via the destination plugin before persisting config.toml
-    dst_reg.create(dest_cfg)
+    cfg_path = sdir / "config.toml"
+    if cfg_path.exists():
+        cfg = load_workspace_config(ws)
+        cfg.batch_size = batch_size
+        if source_defaults:
+            cfg.source_defaults.update(source_defaults)
+    else:
+        cfg = WorkspaceConfig(
+            batch_size=batch_size,
+            network=NetworkConfig(),
+            source_defaults=dict(source_defaults or {}),
+        )
 
-    cfg = WorkspaceConfig(
-        default_destination=destination_name,
-        batch_size=batch_size,
-        network=net_cfg,
-        destinations={destination_name: dest_cfg},
-        source_defaults=dict(source_defaults or {}),
-    )
-    cfg_path = save_workspace_config(ws, cfg)
+    if destination_type.strip():
+        dtype = destination_type.strip()
+        dname = destination_name.strip() or "default"
+        sink_cls = dst_reg.get_class(dtype)
+        normalized_opts = sink_cls.apply_defaults(dict(destination_options or {}))
+        dest_cfg = DestinationConfig(name=dname, type=dtype, options=normalized_opts)
+        dst_reg.create(dest_cfg, workspace_dir=ws)
+        cfg.destinations[dname] = dest_cfg
+        if not cfg.default_destination:
+            cfg.default_destination = dname
+
+    saved_cfg_path = save_workspace_config(ws, cfg)
     db = SeraDatabase(sdir / "sera.sqlite")
     uv_info = (
         ensure_uv_dependencies(ws, src_reg, dst_reg)
@@ -125,10 +146,10 @@ def initialize_workspace(
     return {
         "workspace_dir": str(ws),
         "sera_dir": str(sdir),
-        "config_path": str(cfg_path),
+        "config_path": str(saved_cfg_path),
         "sqlite_path": str(db.db_path),
-        "default_destination": destination_name,
-        "destination_type": destination_type,
+        "default_source": cfg.default_source,
+        "default_destination": cfg.default_destination,
         "uv": uv_info,
     }
 
@@ -165,16 +186,93 @@ class SeraService:
     def reload_config(self) -> None:
         self.config = load_workspace_config(self.workspace_dir)
 
+    def resolve_source_and_profile(self, source_or_profile: str, profile: str = "default") -> tuple[str, str]:
+        """Resolve `(source_plugin_type, profile_name)` from either plugin name or configured profile name."""
+        key = source_or_profile.strip()
+        prof = profile.strip() or "default"
+        if not key and self.config.default_source and self.config.default_source in self.config.sources:
+            sp = self.config.sources[self.config.default_source]
+            return sp.type, sp.name
+        if key in self.sources.names():
+            return key, prof
+        if key in self.config.sources:
+            sp = self.config.sources[key]
+            return sp.type, sp.name
+        return key, prof
+
     def get_connector(self, source_name: str) -> BaseSourceConnector:
         if self._connector_override is not None:
             return self._connector_override
-        return self.sources.create(source_name, self.workspace_dir, self.config)
+        resolved_type, _ = self.resolve_source_and_profile(source_name)
+        return self.sources.create(resolved_type, self.workspace_dir, self.config)
 
     def get_sink(self, destination_name: str = "") -> BaseDestinationSink:
         if self._sink_override is not None:
             return self._sink_override
         dest_cfg = self.config.get_destination(destination_name)
-        return self.destinations.create(dest_cfg)
+        return self.destinations.create(dest_cfg, workspace_dir=self.workspace_dir)
+
+    def add_source(
+        self,
+        source_type: str,
+        *,
+        profile: str = "default",
+        auth_mode: str,
+        source_options: dict[str, Any] | None = None,
+        auth_values: dict[str, str] | None = None,
+        set_default: bool = False,
+        on_message: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Configure a source profile (source-specific options like proxy + isolated auth credentials)."""
+        self.reload_config()
+        stype = source_type.strip()
+        pname = profile.strip() or "default"
+        src_cls = self.sources.get_class(stype)
+
+        existing_opts = (
+            dict(self.config.sources[pname].options)
+            if pname in self.config.sources and self.config.sources[pname].type == stype
+            else {}
+        )
+        existing_opts.update(source_options or {})
+        normalized_opts = src_cls.apply_defaults(existing_opts)
+
+        self.config.sources[pname] = SourceProfileConfig(
+            name=pname,
+            type=stype,
+            options=normalized_opts,
+        )
+        if set_default or not self.config.default_source:
+            self.config.default_source = pname
+        save_workspace_config(self.workspace_dir, self.config)
+
+        connector = self.get_connector(stype)
+        auth_inputs = dict(auth_values or {})
+        # Also pass source proxy_url / ca_bundle if present so initial interactive login (device-code/browser) uses it
+        for net_key in ("proxy_url", "ca_bundle"):
+            if normalized_opts.get(net_key) and net_key not in auth_inputs:
+                auth_inputs[net_key] = str(normalized_opts[net_key])
+
+        receipt = connector.configure_auth(
+            profile=pname,
+            mode=auth_mode.strip(),
+            values=auth_inputs,
+            on_message=on_message,
+        )
+        self.db.upsert_auth_profile(
+            source=stype,
+            profile=pname,
+            auth_mode=str(receipt.get("auth_mode", auth_mode)),
+            tenant_id=str(receipt.get("tenant_id", "")),
+            client_id=str(receipt.get("client_id", "")),
+        )
+        return {
+            **receipt,
+            "source_type": stype,
+            "profile": pname,
+            "default_source": self.config.default_source == pname,
+            "options": normalized_opts,
+        }
 
     def configure_source_auth(
         self,
@@ -184,35 +282,88 @@ class SeraService:
         values: dict[str, str],
         on_message: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
-        """Delegate credential onboarding to the target source plugin and record non-secret metadata."""
-        self.reload_config()
-        connector = self.get_connector(source_name)
-        receipt = connector.configure_auth(
+        """Delegate credential onboarding and split any source options cleanly into `[sources.<profile>]`."""
+        src_cls = self.sources.get_class(source_name.strip())
+        opt_names = {s.name for s in src_cls.option_specs()}
+        src_opts = {k: v for k, v in values.items() if k in opt_names and str(v).strip() != ""}
+        auth_vals = {k: v for k, v in values.items() if k not in opt_names or k in {"proxy_url", "ca_bundle"}}
+        return self.add_source(
+            source_type=source_name,
             profile=profile,
-            mode=mode,
-            values=values,
+            auth_mode=mode,
+            source_options=src_opts,
+            auth_values=auth_vals,
             on_message=on_message,
         )
-        self.db.upsert_auth_profile(
-            source=source_name,
-            profile=profile,
-            auth_mode=str(receipt.get("auth_mode", mode)),
-            tenant_id=str(receipt.get("tenant_id", "")),
-            client_id=str(receipt.get("client_id", "")),
+
+    def add_destination(
+        self,
+        dest_type: str,
+        *,
+        name: str = "default",
+        auth_mode: str = "",
+        dest_options: dict[str, Any] | None = None,
+        auth_values: dict[str, str] | None = None,
+        set_default: bool = False,
+    ) -> dict[str, Any]:
+        """Configure a destination profile (sink-specific options like file paths / HTTP proxy + isolated auth)."""
+        self.reload_config()
+        dtype = dest_type.strip()
+        dname = name.strip() or "default"
+        sink_cls = self.destinations.get_class(dtype)
+        modes = sink_cls.auth_modes()
+        resolved_mode = auth_mode.strip() or next(iter(modes))
+        if resolved_mode not in modes:
+            raise ValueError(
+                f"Unsupported auth mode '{resolved_mode}' for destination '{dtype}'. Valid: {', '.join(sorted(modes))}"
+            )
+
+        normalized_opts = sink_cls.apply_defaults(dict(dest_options or {}))
+        dest_cfg = DestinationConfig(name=dname, type=dtype, options=normalized_opts)
+        sink = self.destinations.create(dest_cfg, workspace_dir=self.workspace_dir)
+        auth_receipt = sink.configure_auth(
+            self.workspace_dir,
+            mode=resolved_mode,
+            values=dict(auth_values or {}),
         )
-        return receipt
+
+        self.config.destinations[dname] = dest_cfg
+        if set_default or not self.config.default_destination:
+            self.config.default_destination = dname
+        save_workspace_config(self.workspace_dir, self.config)
+
+        return {
+            "name": dname,
+            "type": dtype,
+            "auth_mode": auth_receipt["auth_mode"],
+            "target": sink.describe_target(),
+            "default_destination": self.config.default_destination == dname,
+            "summary": sink.config_summary(),
+        }
 
     def list_sources(self) -> dict[str, Any]:
-        """List discovered source plugins, sub_sources, auth modes, and readiness (zero schema sampling)."""
+        """List discovered source plugins, configured profiles, options, auth modes, and readiness."""
         self.reload_config()
         stored_profiles = self.db.list_auth_profiles()
         result: dict[str, Any] = {}
         for sname in self.sources.names():
             conn = self.get_connector(sname)
-            prof_names = [p["profile"] for p in stored_profiles if p["source"] == sname] or ["default"]
-            profiles_status = [conn.check_auth_status(p) for p in prof_names]
+            cfg_prof_names = [p.name for p in self.config.sources.values() if p.type == sname]
+            db_prof_names = [p["profile"] for p in stored_profiles if p["source"] == sname]
+            prof_names = list(dict.fromkeys([*cfg_prof_names, *db_prof_names])) or ["default"]
+            profiles_status = []
+            for p in prof_names:
+                st = conn.check_auth_status(p)
+                if p in self.config.sources and self.config.sources[p].type == sname:
+                    st["options"] = self.config.sources[p].options
+                profiles_status.append(st)
+
             result[sname] = {
                 "sub_sources": conn.supported_sub_sources(),
+                "options": [
+                    {"name": o.name, "required": o.required, "default": o.default, "description": o.description}
+                    for o in conn.option_specs()
+                ],
                 "auth_modes": {
                     m: {"description": spec.description, "fields": [f.name for f in spec.fields]}
                     for m, spec in conn.auth_modes().items()
@@ -227,7 +378,7 @@ class SeraService:
         self.reload_config()
         configured: dict[str, Any] = {}
         for name, dcfg in self.config.destinations.items():
-            sink = self.destinations.create(dcfg)
+            sink = self.destinations.create(dcfg, workspace_dir=self.workspace_dir)
             configured[name] = sink.config_summary()
         return {
             "default_destination": self.config.default_destination,
@@ -238,7 +389,11 @@ class SeraService:
     def list_templates(self, source: str = "", sub_source: str = "") -> list[dict[str, Any]]:
         """Query discovered source plugins for their canonical full-event templates."""
         self.reload_config()
-        target_sources = [source] if source else self.sources.names()
+        if source.strip():
+            resolved_type, _ = self.resolve_source_and_profile(source.strip())
+            target_sources = [resolved_type]
+        else:
+            target_sources = self.sources.names()
         items: list[dict[str, Any]] = []
         for sname in target_sources:
             conn = self.get_connector(sname)
@@ -250,14 +405,28 @@ class SeraService:
     def enqueue_job(self, spec: JobSpec) -> dict[str, Any]:
         """Validate and create a pending job in `sera.sqlite`, returning `job_id` and plugin lookup hint."""
         self.reload_config()
-        connector = self.get_connector(spec.source)
-        sink = self.get_sink(spec.destination)
+        resolved_type, resolved_prof = self.resolve_source_and_profile(spec.source, spec.profile)
+        normalized_spec = JobSpec(
+            source=resolved_type,
+            sub_source=spec.sub_source,
+            table_or_endpoint=spec.table_or_endpoint,
+            start_time=spec.start_time,
+            end_time=spec.end_time,
+            template=spec.template,
+            params=spec.params,
+            profile=resolved_prof,
+            target_id=spec.target_id,
+            destination=spec.destination,
+            initial_chunk_hours=spec.initial_chunk_hours,
+        )
+        connector = self.get_connector(resolved_type)
+        sink = self.get_sink(normalized_spec.destination)
         engine = CollectionEngine(
             config=self.config,
             db=self.db,
             spool=self.spool,
         )
-        job_id = engine.enqueue_job(spec, connector, sink)
+        job_id = engine.enqueue_job(normalized_spec, connector, sink)
         return {
             "job_id": job_id,
             "status": JobStatus.PENDING.value,

@@ -1,10 +1,10 @@
 # BigQuery Destination Plugin (`type="bigquery"`)
 
-## 1. Initialization & Ambient GCP Authentication
-BigQuery relies exclusively on ambient Google Cloud **Application Default Credentials (ADC)** and environment variables (`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`) for authentication and project selection—no `project_id`, credential file, or proxy flags are used:
+## 1. Adding the Destination (`sera dest add bigquery`)
+BigQuery relies exclusively on ambient Google Cloud **Application Default Credentials (`auth_mode="adc"`)** and environment variables (`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`) for authentication and project selection—no `project_id`, credential file, or proxy flags are used:
 
 ```bash
-sera init --dest-type bigquery
+sera dest add bigquery
 ```
 
 ---
@@ -31,7 +31,7 @@ SELECT * FROM `<project>.sera.events` WHERE job_id = '<job_id>'
 
 ---
 
-## 4. Optional Destination Overrides (`--dest-opt KEY=VALUE`)
+## 4. Optional Destination Overrides (`--opt KEY=VALUE`)
 | Option | Default | Description |
 | :--- | :--- | :--- |
 | `dataset_id` | `sera` | Target BigQuery dataset ID |

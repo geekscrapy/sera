@@ -2,7 +2,8 @@
 
 Every telemetry source (e.g. `microsoft`, `splunk`, `crowdstrike`, `wiz`) lives in its
 own package under `sera/sources/<name>/` (or registers via entry point `sera.sources`)
-and encapsulates all vendor auth, query templates, pagination, and runtime dependencies.
+and encapsulates all source options (e.g. proxies, workspace IDs), auth modes, query
+templates, pagination, and runtime dependencies.
 """
 
 from __future__ import annotations
@@ -20,8 +21,18 @@ from sera.core.models import JobSpec, SliceResult
 
 
 @dataclass(frozen=True)
+class SourceOptionSpec:
+    """Declarative non-secret configuration option owned by a source plugin (stored in `.sera/config.toml`)."""
+
+    name: str
+    description: str
+    required: bool = False
+    default: Any = None
+
+
+@dataclass(frozen=True)
 class AuthFieldSpec:
-    """Declarative specification for an authentication input field owned by a source plugin."""
+    """Declarative specification for an authentication input field owned by a plugin."""
 
     name: str
     description: str
@@ -32,7 +43,7 @@ class AuthFieldSpec:
 
 @dataclass(frozen=True)
 class AuthModeSpec:
-    """Declarative specification for an authentication mode supported by a source plugin."""
+    """Declarative specification for an authentication mode supported by a plugin."""
 
     mode: str
     description: str
@@ -49,8 +60,32 @@ class BaseSourceConnector(ABC):
         self.workspace_dir = workspace_dir
         self.config = config
 
+    @classmethod
+    def option_specs(cls) -> tuple[SourceOptionSpec, ...]:
+        """Declare source-specific options (e.g. `proxy_url`, `ca_bundle`, workspace IDs) for `sera source add`."""
+        return ()
+
+    @classmethod
+    def apply_defaults(cls, raw_options: dict[str, Any]) -> dict[str, Any]:
+        """Apply plugin-defined default option values."""
+        merged = dict(raw_options)
+        for spec in cls.option_specs():
+            if spec.name not in merged and spec.default is not None:
+                merged[spec.name] = list(spec.default) if isinstance(spec.default, (list, tuple)) else spec.default
+        return merged
+
+    def get_source_options(self, profile: str = "default") -> dict[str, Any]:
+        """Resolve merged source options for `profile` from `.sera/config.toml`."""
+        merged: dict[str, Any] = self.apply_defaults({})
+        if self.source_name in self.config.source_defaults:
+            merged.update(self.config.source_defaults[self.source_name])
+        prof_cfg = self.config.get_source_profile(self.source_name, profile=profile)
+        if prof_cfg is not None:
+            merged.update(prof_cfg.options)
+        return merged
+
     def source_network(self, profile: str = "default") -> NetworkConfig:
-        """Return HTTP client network settings for this source plugin (proxy is source-scoped, never destination-scoped)."""
+        """Return HTTP client network settings for this source plugin (proxy is source-scoped)."""
         return self.config.network
 
     @classmethod
@@ -64,7 +99,7 @@ class BaseSourceConnector(ABC):
     @classmethod
     @abstractmethod
     def auth_modes(cls) -> dict[str, AuthModeSpec]:
-        """Declare supported authentication modes and their input fields for the CLI."""
+        """Declare supported authentication modes and their input fields for `sera source add`."""
 
     @abstractmethod
     def configure_auth(

@@ -10,7 +10,7 @@ from sera.config import NetworkConfig, WorkspaceConfig
 from sera.core.http_client import SeraHttpClient
 from sera.core.models import JobSpec, SliceResult
 from sera.core.template_primitives import TemplateValidationError, validate_table_ident
-from sera.sources.base import AuthFieldSpec, AuthModeSpec, BaseSourceConnector
+from sera.sources.base import AuthFieldSpec, AuthModeSpec, BaseSourceConnector, SourceOptionSpec
 from sera.sources.microsoft.arm_activity import fetch_arm_activity_slice, validate_arm_endpoint
 from sera.sources.microsoft.auth import DEFAULT_GRAPH_POWERSHELL_CLIENT_ID, MicrosoftAuthManager
 from sera.sources.microsoft.defender_hunting import fetch_defender_hunting_slice
@@ -86,18 +86,53 @@ class MicrosoftSourceConnector(BaseSourceConnector):
 
     def __init__(self, workspace_dir: Path, config: WorkspaceConfig) -> None:
         super().__init__(workspace_dir, config)
-        ms_defaults = config.source_defaults.get("microsoft", {})
+        base_opts = self.get_source_options("default")
         self.auth = MicrosoftAuthManager(
             workspace_dir=workspace_dir,
             network=config.network,
-            default_proxy_url=str(ms_defaults.get("proxy_url", "")),
-            default_ca_bundle=str(ms_defaults.get("ca_bundle", "")),
+            default_proxy_url=str(base_opts.get("proxy_url", "")),
+            default_ca_bundle=str(base_opts.get("ca_bundle", "")),
         )
         self.templates = MicrosoftTemplateEngine()
 
+    @classmethod
+    def option_specs(cls) -> tuple[SourceOptionSpec, ...]:
+        return (
+            SourceOptionSpec(
+                "proxy_url",
+                "Optional HTTP/HTTPS/SOCKS5 proxy URL scoped strictly to Microsoft endpoints",
+                required=False,
+                default="",
+            ),
+            SourceOptionSpec(
+                "ca_bundle",
+                "Optional custom CA certificate PEM path for Microsoft proxy",
+                required=False,
+                default="",
+            ),
+            SourceOptionSpec(
+                "default_workspace_id",
+                "Optional default Log Analytics / Sentinel Workspace GUID",
+                required=False,
+                default="",
+            ),
+            SourceOptionSpec(
+                "default_subscription_id",
+                "Optional default Azure Subscription GUID for ARM Activity Logs",
+                required=False,
+                default="",
+            ),
+        )
+
     def source_network(self, profile: str = "default") -> NetworkConfig:
         """Return Microsoft-scoped proxy and TLS settings for `profile` (never touches BigQuery/destinations)."""
-        return self.auth.effective_network(profile)
+        prof_cfg = self.config.get_source_profile(self.source_name, profile=profile)
+        prof_opts = prof_cfg.options if prof_cfg is not None else {}
+        return self.auth.effective_network(
+            profile,
+            override_proxy_url=str(prof_opts.get("proxy_url", "")),
+            override_ca_bundle=str(prof_opts.get("ca_bundle", "")),
+        )
 
     @classmethod
     def auth_modes(cls) -> dict[str, AuthModeSpec]:
@@ -302,8 +337,8 @@ class MicrosoftSourceConnector(BaseSourceConnector):
     def _resolve_target_id(self, spec: JobSpec, default_key: str) -> str:
         if spec.target_id.strip():
             return spec.target_id.strip()
-        ms_defaults = self.config.source_defaults.get("microsoft", {})
-        return str(ms_defaults.get(default_key, "")).strip()
+        opts = self.get_source_options(spec.profile)
+        return str(opts.get(default_key, "")).strip()
 
     def validate_job_spec(self, spec: JobSpec) -> None:
         if spec.sub_source not in SUB_SOURCE_SPECS:

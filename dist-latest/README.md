@@ -5,9 +5,24 @@ Self-contained Antigravity plugin providing tamper-proof, template-driven DFIR t
 ## How MCP Launches Locally via `uvx`
 `mcp_config.json` executes the bundled local script `${PLUGIN_ROOT}/scripts/sera_mcp.py` via `uvx`, automatically provisioning Python and dependencies from the plugin bundle without remote Git URLs or hardcoded paths.
 
-## Installing the `sera` CLI from the Plugin Bundle
+## Installing `sera` into Your Current `.venv` (No Global Install Required)
+Activate (or create) your engagement's `.venv`, then install `sera` directly into that virtual environment from the plugin directory:
 ```bash
-uv tool install ~/.gemini/config/plugins/sera
+uv venv .venv
+source .venv/bin/activate
+uv pip install ~/.gemini/config/plugins/sera
+```
+
+## Engagement Setup Workflow
+```bash
+# 1. Initialize .sera/ in your engagement workspace
+sera init
+
+# 2. Add a source (source-specific options like proxy + auth credentials)
+sera source add <source_type>
+
+# 3. Add a destination (destination-specific options like file paths / HTTP proxy + auth)
+sera dest add <dest_type>
 ```
 
 ## Local Development via Symlink

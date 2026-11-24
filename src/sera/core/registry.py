@@ -103,14 +103,17 @@ class DestinationRegistry:
             raise KeyError(f"Unknown destination plugin '{sink_type}'. Registered types: {available}")
         return self._sinks[sink_type]
 
-    def create(self, dest_config: DestinationConfig) -> BaseDestinationSink:
+    def create(self, dest_config: DestinationConfig, workspace_dir: Path | None = None) -> BaseDestinationSink:
         cls = self.get_class(dest_config.type)
         normalized_cfg = DestinationConfig(
             name=dest_config.name,
             type=dest_config.type,
             options=cls.apply_defaults(dest_config.options),
         )
-        return cls(dest_config=normalized_cfg)
+        try:
+            return cls(dest_config=normalized_cfg, workspace_dir=workspace_dir)  # type: ignore[call-arg]
+        except TypeError:
+            return cls(dest_config=normalized_cfg)
 
     def required_packages(self) -> list[str]:
         pkgs: set[str] = set()

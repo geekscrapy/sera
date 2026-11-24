@@ -1,4 +1,4 @@
-"""End-to-end parity tests proving 1-to-1 workflows across `sera` CLI and `MCPServer`, plus zero cross-case overlap."""
+"""End-to-end parity tests for `sera init` -> `sera source add` -> `sera dest add` -> `collect`/`jobs`/`status`."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from sera.cli.app import app
 from sera.mcp_server.server import create_mcp_server
+from sera.service import resolve_target_venv_python
 
 
 runner = CliRunner()
@@ -28,69 +29,125 @@ def _extract_mcp_json(tool_result: object) -> dict | list:
     return json.loads(joined)
 
 
+def test_resolve_target_venv_python_respects_active_virtual_env(tmp_path: Path, monkeypatch) -> None:
+    fake_venv = tmp_path / "custom_venv"
+    fake_py = fake_venv / "bin" / "python"
+    fake_py.parent.mkdir(parents=True)
+    fake_py.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("VIRTUAL_ENV", str(fake_venv))
+
+    resolved = resolve_target_venv_python(tmp_path / "engagement_ws")
+    assert resolved == str(fake_py)
+
+
 async def test_cli_and_mcp_full_parity_and_multi_engagement_isolation(tmp_path: Path) -> None:
     case_alpha = tmp_path / "case_alpha"
     case_beta = tmp_path / "case_beta"
     sink_alpha = tmp_path / "sink_alpha"
     sink_beta = tmp_path / "sink_beta"
 
-    # 1. Initialize TWO independent client engagement workspaces via plugin-driven CLI
-    for ws, sink in ((case_alpha, sink_alpha), (case_beta, sink_beta)):
+    # 1. Step 1: Bare `sera init` (zero source/dest flags required upfront)
+    for ws in (case_alpha, case_beta):
         res = runner.invoke(
             app,
             [
                 "init",
                 "--workspace",
                 str(ws),
-                "--dest-type",
-                "jsonl",
-                "--dest-opt",
-                f"output_dir={sink}",
                 "--skip-uv",
                 "--json",
             ],
         )
         assert res.exit_code == 0, res.output
 
-    # Configure isolated tokens in each engagement workspace via generic plugin CLI
-    assert (
-        runner.invoke(
+    # 2. Step 2: `sera source add` (source-specific options like default_workspace_id/proxy + isolated auth credentials)
+    src_alpha = runner.invoke(
+        app,
+        [
+            "source",
+            "add",
+            "microsoft",
+            "--auth-mode",
+            "static-bearer",
+            "--opt",
+            "access_token=tok-alpha",
+            "--opt",
+            "tenant_id=tenant-alpha",
+            "--opt",
+            "default_workspace_id=ws-alpha-guid",
+            "--workspace",
+            str(case_alpha),
+            "--json",
+        ],
+    )
+    assert src_alpha.exit_code == 0, src_alpha.output
+    # Ensure secret token is NOT stored in .sera/config.toml
+    assert "tok-alpha" not in (case_alpha / ".sera" / "config.toml").read_text(encoding="utf-8")
+    assert "ws-alpha-guid" in (case_alpha / ".sera" / "config.toml").read_text(encoding="utf-8")
+
+    src_beta = runner.invoke(
+        app,
+        [
+            "source",
+            "add",
+            "microsoft",
+            "--auth-mode",
+            "static-bearer",
+            "--opt",
+            "access_token=tok-beta",
+            "--opt",
+            "tenant_id=tenant-beta",
+            "--workspace",
+            str(case_beta),
+            "--json",
+        ],
+    )
+    assert src_beta.exit_code == 0, src_beta.output
+
+    # 3. Step 3: `sera dest add` (destination-specific options like file paths + auth)
+    for ws, sink in ((case_alpha, sink_alpha), (case_beta, sink_beta)):
+        dst_res = runner.invoke(
             app,
             [
-                "auth",
+                "dest",
                 "add",
-                "microsoft",
-                "--mode",
-                "static-bearer",
+                "jsonl",
                 "--opt",
-                "access_token=tok-alpha",
-                "--opt",
-                "tenant_id=tenant-alpha",
+                f"output_dir={sink}",
                 "--workspace",
-                str(case_alpha),
+                str(ws),
+                "--json",
             ],
-        ).exit_code
-        == 0
+        )
+        assert dst_res.exit_code == 0, dst_res.output
+
+    # Also verify `sera dest add http` stores secret HEC token in `.sera/creds/dest_<name>.json` rather than config.toml
+    http_dest_res = runner.invoke(
+        app,
+        [
+            "dest",
+            "add",
+            "http",
+            "--name",
+            "siem_hec",
+            "--auth-mode",
+            "splunk-hec",
+            "--opt",
+            "url=https://siem.example.test/services/collector",
+            "--opt",
+            "format=splunk_hec",
+            "--opt",
+            "proxy_url=http://127.0.0.1:8080",
+            "--opt",
+            "hec_token=super-secret-hec",
+            "--workspace",
+            str(case_alpha),
+            "--json",
+        ],
     )
-    assert (
-        runner.invoke(
-            app,
-            [
-                "auth",
-                "add",
-                "microsoft",
-                "--mode",
-                "static-bearer",
-                "--opt",
-                "access_token=tok-beta",
-                "--opt",
-                "tenant_id=tenant-beta",
-                "--workspace",
-                str(case_beta),
-            ],
-        ).exit_code
-        == 0
-    )
+    assert http_dest_res.exit_code == 0, http_dest_res.output
+    assert "super-secret-hec" not in (case_alpha / ".sera" / "config.toml").read_text(encoding="utf-8")
+    assert (case_alpha / ".sera" / "creds" / "dest_siem_hec.json").is_file()
 
     mcp_server, pool = create_mcp_server()
 
@@ -114,6 +171,7 @@ async def test_cli_and_mcp_full_parity_and_multi_engagement_isolation(tmp_path: 
     )
     assert cli_sources == mcp_sources
     assert mcp_sources["microsoft"]["profiles"][0]["tenant_id"] == "tenant-alpha"  # type: ignore[index]
+    assert mcp_sources["microsoft"]["profiles"][0]["options"]["default_workspace_id"] == "ws-alpha-guid"  # type: ignore[index]
 
     cli_dests = json.loads(
         runner.invoke(app, ["destinations", "--workspace", str(case_alpha), "--json"]).stdout
@@ -122,6 +180,8 @@ async def test_cli_and_mcp_full_parity_and_multi_engagement_isolation(tmp_path: 
         await mcp_server.call_tool("destinations", {"workspace_dir": str(case_alpha)})
     )
     assert cli_dests == mcp_dests
+    assert mcp_dests["configured"]["siem_hec"]["has_auth"] is True  # type: ignore[index]
+    assert mcp_dests["configured"]["siem_hec"]["has_proxy"] is True  # type: ignore[index]
 
     cli_templates = json.loads(
         runner.invoke(app, ["templates", "--sub-source", "entra", "--workspace", str(case_alpha), "--json"]).stdout
@@ -145,13 +205,12 @@ async def test_cli_and_mcp_full_parity_and_multi_engagement_isolation(tmp_path: 
             ]
         )
 
+        # Notice `--source` can even be omitted in CLI when `default_source` was set by `sera source add`!
         cli_collect = await asyncio.to_thread(
             runner.invoke,
             app,
             [
                 "collect",
-                "--source",
-                "microsoft",
                 "--sub-source",
                 "entra",
                 "--target",
