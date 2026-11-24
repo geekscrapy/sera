@@ -7,6 +7,8 @@
 #     "httpx[socks]>=0.27.0",
 #     "mcp>=1.2.0",
 #     "msal>=1.28.0",
+#     "pysocks>=1.7.1",
+#     "requests[socks]>=2.31.0",
 #     "rich>=13.7.0",
 #     "typer>=0.12.0",
 # ]

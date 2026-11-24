@@ -82,7 +82,12 @@ class MicrosoftSourceConnector(BaseSourceConnector):
     """Self-contained Microsoft/Azure telemetry plugin across all 6 DFIR surfaces."""
 
     source_name = "microsoft"
-    required_packages = ("msal>=1.28.0", "cryptography>=42.0.0")
+    required_packages = (
+        "cryptography>=42.0.0",
+        "msal>=1.28.0",
+        "pysocks>=1.7.1",
+        "requests[socks]>=2.31.0",
+    )
 
     def __init__(self, workspace_dir: Path, config: WorkspaceConfig) -> None:
         super().__init__(workspace_dir, config)

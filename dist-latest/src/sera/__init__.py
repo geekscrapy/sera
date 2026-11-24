@@ -11,6 +11,7 @@ CORE_UV_PACKAGES: tuple[str, ...] = (
     "cryptography>=42.0.0",
     "httpx[socks]>=0.27.0",
     "mcp>=1.2.0",
+    "pysocks>=1.7.1",
     "rich>=13.7.0",
     "typer>=0.12.0",
 )
