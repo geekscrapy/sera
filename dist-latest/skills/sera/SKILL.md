@@ -58,7 +58,7 @@ Each `sub_source` uses **one canonical full-event query template** (`params={}` 
 1. **`entra`** (MS Graph OData; requires MSAL profile; default 24h slices):
    - `table_or_endpoint`: `signIns` | `directoryAudits` | `provisioning` | `riskDetections`
    - Optional `params`: `equals`, `in_list`, `contains`, `startswith`
-2. **`purview_ual`** (MS Graph async `/beta/security/auditLog/queries`; requires MSAL `AuditLogsQuery.Read.All`; bisects near 1M cap):
+2. **`purview_ual`** (MS Graph async `/v1.0/security/auditLog/queries`; requires MSAL `AuditLogsQuery.Read.All`; bisects when `isRecordCountLimitExceeded` or near 1M cap):
    - `table_or_endpoint`: `auditLogRecords`
    - Optional `params`: `users`, `ips`, `operations`, `services`, `record_types`, `object_ids`, `keyword`
 3. **`log_analytics`** (Azure Monitor / Sentinel KQL; requires `target_id` = Workspace GUID or `default_workspace_id` in `.sera/config.toml`; bisects on `PartialError` / 500k cap):
@@ -72,7 +72,7 @@ Each `sub_source` uses **one canonical full-event query template** (`params={}` 
    - Optional `params`: `action_types`, `search_text`
 6. **`arm_activity`** (Azure Subscription Activity Logs, 90d lookback; requires `target_id` = Subscription GUID or `default_subscription_id` in `.sera/config.toml`):
    - `table_or_endpoint`: `management`
-   - Optional `params`: `equals` on `caller`, `resourceGroupName`, `resourceType`, `resourceId`, `status`
+   - Optional `params`: single `equals` filter on `resourceGroupName`, `resourceUri`, `resourceProvider`, or `correlationId`
 
 ### Filter `params` Reference (`entra`, `log_analytics`, `defender_hunting`, `arm_activity`)
 ```json

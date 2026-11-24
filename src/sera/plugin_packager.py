@@ -7,13 +7,13 @@ import json
 import os
 import shutil
 import stat
-import sys
 import zipfile
 from pathlib import Path
 from typing import Any
 
 from sera import __version__
 from sera.hooks import guard_dot_sera
+from sera.service import collect_required_uv_packages
 
 
 SERA_RULE_MD = """# SERA — Secure Extraction for Response Agents (`sera.md`)
@@ -87,7 +87,7 @@ Each `sub_source` uses **one canonical full-event query template** (`params={}` 
 1. **`entra`** (MS Graph OData; requires MSAL profile; default 24h slices):
    - `table_or_endpoint`: `signIns` | `directoryAudits` | `provisioning` | `riskDetections`
    - Optional `params`: `equals`, `in_list`, `contains`, `startswith`
-2. **`purview_ual`** (MS Graph async `/beta/security/auditLog/queries`; requires MSAL `AuditLogsQuery.Read.All`; bisects near 1M cap):
+2. **`purview_ual`** (MS Graph async `/v1.0/security/auditLog/queries`; requires MSAL `AuditLogsQuery.Read.All`; bisects when `isRecordCountLimitExceeded` or near 1M cap):
    - `table_or_endpoint`: `auditLogRecords`
    - Optional `params`: `users`, `ips`, `operations`, `services`, `record_types`, `object_ids`, `keyword`
 3. **`log_analytics`** (Azure Monitor / Sentinel KQL; requires `target_id` = Workspace GUID or `default_workspace_id` in `.sera/config.toml`; bisects on `PartialError` / 500k cap):
@@ -101,7 +101,7 @@ Each `sub_source` uses **one canonical full-event query template** (`params={}` 
    - Optional `params`: `action_types`, `search_text`
 6. **`arm_activity`** (Azure Subscription Activity Logs, 90d lookback; requires `target_id` = Subscription GUID or `default_subscription_id` in `.sera/config.toml`):
    - `table_or_endpoint`: `management`
-   - Optional `params`: `equals` on `caller`, `resourceGroupName`, `resourceType`, `resourceId`, `status`
+   - Optional `params`: single `equals` filter on `resourceGroupName`, `resourceUri`, `resourceProvider`, or `correlationId`
 
 ### Filter `params` Reference (`entra`, `log_analytics`, `defender_hunting`, `arm_activity`)
 ```json
@@ -122,9 +122,17 @@ Field names are validated identifiers (`^[A-Za-z_][A-Za-z0-9_./-]*$`) and values
 
 PLUGIN_README_MD = """# SERA — Secure Extraction for Response Agents
 
-Antigravity plugin providing tamper-proof, template-driven DFIR telemetry acquisition with full CLI and MCP parity.
+Self-contained Antigravity plugin providing tamper-proof, template-driven DFIR telemetry acquisition with full CLI and MCP parity.
 
-## Testing via Symlink
+## How MCP Launches Locally via `uvx`
+`mcp_config.json` executes the bundled local script `${PLUGIN_ROOT}/scripts/sera_mcp.py` via `uvx`, automatically provisioning Python and dependencies from the plugin bundle without remote Git URLs or hardcoded paths.
+
+## Installing the `sera` CLI from the Plugin Bundle
+```bash
+uv tool install ~/.gemini/config/plugins/sera
+```
+
+## Local Development via Symlink
 From the `git/` directory, link `dist-latest` directly into your global Antigravity plugins directory:
 ```bash
 ln -s "$(pwd)/dist-latest" ~/.gemini/config/plugins/sera
@@ -132,12 +140,73 @@ ln -s "$(pwd)/dist-latest" ~/.gemini/config/plugins/sera
 """
 
 
+def _render_bundled_pyproject(version: str, dependencies: list[str]) -> str:
+    deps_lines = "\n".join(f'    "{dep}",' for dep in dependencies)
+    return (
+        '[build-system]\n'
+        'requires = ["hatchling"]\n'
+        'build-backend = "hatchling.build"\n\n'
+        '[project]\n'
+        'name = "sera-dfir"\n'
+        f'version = "{version}"\n'
+        'description = "SERA — Secure Extraction for Response Agents: CLI-first & MCP forensic log acquisition engine."\n'
+        'readme = "README.md"\n'
+        'requires-python = ">=3.11"\n'
+        'dependencies = [\n'
+        f'{deps_lines}\n'
+        ']\n\n'
+        '[project.scripts]\n'
+        'sera = "sera.cli.app:main"\n'
+        'sera-mcp = "sera.mcp_server.server:main"\n\n'
+        '[tool.hatch.build.targets.wheel]\n'
+        'packages = ["src/sera"]\n'
+    )
+
+
+def _render_entrypoint_script(
+    *,
+    dependencies: list[str],
+    module_path: str,
+    description: str,
+) -> str:
+    dep_comments = "\n".join(f'#     "{dep}",' for dep in dependencies)
+    return (
+        "#!/usr/bin/env -S uv run --script\n"
+        "# /// script\n"
+        '# requires-python = ">=3.11"\n'
+        "# dependencies = [\n"
+        f"{dep_comments}\n"
+        "# ]\n"
+        "# ///\n"
+        f'"""{description}"""\n\n'
+        "from __future__ import annotations\n\n"
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n\n"
+        'os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")\n'
+        "sys.dont_write_bytecode = True\n\n"
+        '_SRC_DIR = Path(__file__).resolve().parents[1] / "src"\n'
+        "if str(_SRC_DIR) not in sys.path:\n"
+        "    sys.path.insert(0, str(_SRC_DIR))\n\n"
+        f"from {module_path} import main\n\n"
+        'if __name__ == "__main__":\n'
+        "    main()\n"
+    )
+
+
+def _chmod_executable(path: Path) -> None:
+    os.chmod(
+        path,
+        stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH,
+    )
+
+
 def build_plugin_release(
     repo_git_dir: Path,
     *,
     version: str = __version__,
 ) -> dict[str, Any]:
-    """Build unpacked `dist-latest/` and versioned `dist/sera-<version>.zip` inside `repo_git_dir`."""
+    """Build self-contained unpacked `dist-latest/` and versioned `dist/sera-<version>.zip` inside `repo_git_dir`."""
     git_root = repo_git_dir.resolve()
     dist_dir = git_root / "dist"
     dist_latest = git_root / "dist-latest"
@@ -152,6 +221,10 @@ def build_plugin_release(
     (dist_latest / "hooks").mkdir(parents=True, exist_ok=True)
     (dist_latest / "rules").mkdir(parents=True, exist_ok=True)
     (dist_latest / "skills" / "sera").mkdir(parents=True, exist_ok=True)
+    (dist_latest / "scripts").mkdir(parents=True, exist_ok=True)
+    (dist_latest / "src").mkdir(parents=True, exist_ok=True)
+
+    runtime_deps = collect_required_uv_packages()
 
     # 1. plugin.json (strictly valid Antigravity manifest fields)
     plugin_manifest = {
@@ -173,18 +246,57 @@ def build_plugin_release(
         encoding="utf-8",
     )
 
-    # 2. README.md
+    # 2. README.md & bundled pyproject.toml
     (dist_latest / "README.md").write_text(PLUGIN_README_MD, encoding="utf-8")
+    (dist_latest / "pyproject.toml").write_text(
+        _render_bundled_pyproject(version=version, dependencies=runtime_deps),
+        encoding="utf-8",
+    )
 
-    # 3. mcp_config.json (zero hardcoded paths; `uvx` fetches/caches and runs `sera-mcp` automatically)
+    # 3. Copy full local `src/sera/` runtime & plugins into the plugin bundle (excluding bytecode/OS artifacts)
+    candidate_sera_pkg = git_root / "src" / "sera"
+    source_sera_pkg = candidate_sera_pkg if candidate_sera_pkg.is_dir() else Path(__file__).resolve().parent
+    shutil.copytree(
+        source_sera_pkg,
+        dist_latest / "src" / "sera",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".DS_Store"),
+    )
+
+    # 4. Local plugin entrypoint scripts (`scripts/sera_mcp.py` & `scripts/sera_cli.py`) with PEP 723 metadata
+    mcp_script_path = dist_latest / "scripts" / "sera_mcp.py"
+    mcp_script_path.write_text(
+        _render_entrypoint_script(
+            dependencies=runtime_deps,
+            module_path="sera.mcp_server.server",
+            description="Self-contained local plugin MCP server entrypoint for SERA.",
+        ),
+        encoding="utf-8",
+    )
+    _chmod_executable(mcp_script_path)
+
+    cli_script_path = dist_latest / "scripts" / "sera_cli.py"
+    cli_script_path.write_text(
+        _render_entrypoint_script(
+            dependencies=runtime_deps,
+            module_path="sera.cli.app",
+            description="Self-contained local plugin CLI entrypoint for SERA.",
+        ),
+        encoding="utf-8",
+    )
+    _chmod_executable(cli_script_path)
+
+    # 5. mcp_config.json — `uvx` runs directly from the local plugin directory script `${PLUGIN_ROOT}/scripts/sera_mcp.py`
     mcp_config = {
         "mcpServers": {
             "sera": {
                 "command": "uvx",
                 "args": [
-                    "--from",
-                    "git+https://github.com/geekscrapy/sera.git",
-                    "sera-mcp",
+                    "--quiet",
+                    "--with-requirements",
+                    "${PLUGIN_ROOT}/scripts/sera_mcp.py",
+                    "python",
+                    "-B",
+                    "${PLUGIN_ROOT}/scripts/sera_mcp.py",
                 ],
                 "env": {
                     "PYTHONDONTWRITEBYTECODE": "1",
@@ -197,14 +309,11 @@ def build_plugin_release(
         encoding="utf-8",
     )
 
-    # 4. Standalone executable hook script + root hooks.json
+    # 6. Standalone executable hook script + root hooks.json
     hook_source = inspect.getsource(guard_dot_sera)
     hook_script_path = dist_latest / "hooks" / "pre_tool_guard.py"
     hook_script_path.write_text("#!/usr/bin/env python3\n" + hook_source, encoding="utf-8")
-    os.chmod(
-        hook_script_path,
-        stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH,
-    )
+    _chmod_executable(hook_script_path)
 
     hooks_json = {
         "sera-forensic-guard": {
@@ -228,13 +337,11 @@ def build_plugin_release(
         encoding="utf-8",
     )
 
-    # 5. rules/sera.md
+    # 7. rules/sera.md & skills/sera/SKILL.md
     (dist_latest / "rules" / "sera.md").write_text(SERA_RULE_MD, encoding="utf-8")
-
-    # 6. skills/sera/SKILL.md
     (dist_latest / "skills" / "sera" / "SKILL.md").write_text(SERA_SKILL_MD, encoding="utf-8")
 
-    # 7. Versioned zip archive in dist/sera-<version>.zip
+    # 8. Versioned zip archive in dist/sera-<version>.zip
     zip_path = dist_dir / f"sera-{version}.zip"
     if zip_path.exists():
         zip_path.unlink()

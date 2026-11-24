@@ -1,8 +1,9 @@
-"""Unit tests for the `PreToolUse` `.sera/` guard hook and `dist/` + `dist-latest/` plugin artifacts."""
+"""Unit tests for the `PreToolUse` `.sera/` guard hook and self-contained `dist/` + `dist-latest/` plugin artifacts."""
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -40,17 +41,17 @@ def test_hook_blocks_all_dot_sera_access_and_injects_verified_workspace_for_mcp(
     )
     assert allow_normal == {"decision": "allow"}
 
-    # Inject verified workspacePaths[0] into direct SERA MCP tool call
+    # Inject verified workspacePaths[0] into direct SERA MCP tool call (including <plugin>_<server> namespacing)
     mcp_bound = evaluate_pre_tool_use(
         {
             "workspacePaths": ["/cases/client_alpha"],
-            "toolCall": {"name": "mcp_sera_submit_job", "args": {"source": "microsoft", "workspace_dir": "/spoofed"}},
+            "toolCall": {"name": "mcp_sera_sera_submit_job", "args": {"source": "microsoft", "workspace_dir": "/spoofed"}},
         }
     )
     assert mcp_bound == {"decision": "allow", "overwrite": {"workspace_dir": "/cases/client_alpha"}}
 
 
-def test_plugin_packager_produces_valid_dist_zip_and_dist_latest(tmp_path: Path) -> None:
+def test_plugin_packager_produces_self_contained_local_uvx_plugin(tmp_path: Path) -> None:
     fake_git = tmp_path / "git"
     (fake_git / "src").mkdir(parents=True)
     result = build_plugin_release(fake_git, version="0.1.0")
@@ -65,13 +66,49 @@ def test_plugin_packager_produces_valid_dist_zip_and_dist_latest(tmp_path: Path)
     assert manifest["name"] == "sera"
     assert "Secure Extraction for Response Agents" in manifest["displayName"]
 
-    mcp_cfg = json.loads((dist_latest / "mcp_config.json").read_text(encoding="utf-8"))
+    mcp_raw = (dist_latest / "mcp_config.json").read_text(encoding="utf-8")
+    assert "github.com" not in mcp_raw
+    assert str(tmp_path) not in mcp_raw
+    mcp_cfg = json.loads(mcp_raw)
     assert mcp_cfg["mcpServers"]["sera"]["command"] == "uvx"
     assert mcp_cfg["mcpServers"]["sera"]["args"] == [
-        "--from",
-        "git+https://github.com/geekscrapy/sera.git",
-        "sera-mcp",
+        "--quiet",
+        "--with-requirements",
+        "${PLUGIN_ROOT}/scripts/sera_mcp.py",
+        "python",
+        "-B",
+        "${PLUGIN_ROOT}/scripts/sera_mcp.py",
     ]
+
+    # Verify bundled local scripts and source package exist inside dist-latest
+    mcp_script = dist_latest / "scripts" / "sera_mcp.py"
+    cli_script = dist_latest / "scripts" / "sera_cli.py"
+    assert mcp_script.is_file()
+    assert cli_script.is_file()
+    assert (dist_latest / "pyproject.toml").is_file()
+    assert (dist_latest / "src" / "sera" / "mcp_server" / "server.py").is_file()
+    assert "# /// script" in mcp_script.read_text(encoding="utf-8")
+
+    # Execute bundled local MCP & CLI scripts with PYTHONPATH cleared to prove they load strictly from bundled src/sera
+    clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    mcp_help = subprocess.run(
+        [sys.executable, "-B", str(mcp_script), "--help"],
+        env=clean_env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "SERA MCP Server" in mcp_help.stdout
+
+    cli_ver = subprocess.run(
+        [sys.executable, "-B", str(cli_script), "version"],
+        env=clean_env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "0.1.0" in cli_ver.stdout
 
     hooks_cfg = json.loads((dist_latest / "hooks.json").read_text(encoding="utf-8"))
     hook_cmd = hooks_cfg["sera-forensic-guard"]["PreToolUse"][0]["hooks"][0]["command"]
@@ -96,11 +133,15 @@ def test_plugin_packager_produces_valid_dist_zip_and_dist_latest(tmp_path: Path)
     )
     assert json.loads(proc.stdout)["decision"] == "deny"
 
-    # Verify zip contents
+    # Verify zip contents include local scripts, pyproject.toml, and bundled src/sera
     with zipfile.ZipFile(zip_path, "r") as zf:
         names = set(zf.namelist())
     assert "sera/plugin.json" in names
+    assert "sera/pyproject.toml" in names
     assert "sera/mcp_config.json" in names
+    assert "sera/scripts/sera_mcp.py" in names
+    assert "sera/scripts/sera_cli.py" in names
+    assert "sera/src/sera/mcp_server/server.py" in names
     assert "sera/hooks.json" in names
     assert "sera/hooks/pre_tool_guard.py" in names
     assert "sera/rules/sera.md" in names

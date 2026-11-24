@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,15 @@ app.add_typer(dest_app, name="destination")
 
 def _ws(workspace: Optional[Path]) -> Path:
     return workspace.resolve() if workspace else Path.cwd().resolve()
+
+
+def _worker_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    pkg_parent = str(Path(__file__).resolve().parents[2])
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{pkg_parent}{os.pathsep}{existing}" if existing else pkg_parent
+    return env
 
 
 def _parse_kv_pairs(pairs: list[str] | None) -> dict[str, Any]:
@@ -471,6 +481,7 @@ def cmd_collect(
     if background:
         subprocess.Popen(
             [sys.executable, "-B", "-m", "sera.cli.app", "_worker", job_id, "--workspace", str(ws)],
+            env=_worker_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -587,6 +598,7 @@ def cmd_resume(
     if background:
         subprocess.Popen(
             [sys.executable, "-B", "-m", "sera.cli.app", "_worker", job_id, "--workspace", str(ws)],
+            env=_worker_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

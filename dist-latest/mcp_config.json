@@ -3,9 +3,12 @@
     "sera": {
       "command": "uvx",
       "args": [
-        "--from",
-        "git+https://github.com/geekscrapy/sera.git",
-        "sera-mcp"
+        "--quiet",
+        "--with-requirements",
+        "${PLUGIN_ROOT}/scripts/sera_mcp.py",
+        "python",
+        "-B",
+        "${PLUGIN_ROOT}/scripts/sera_mcp.py"
       ],
       "env": {
         "PYTHONDONTWRITEBYTECODE": "1"
