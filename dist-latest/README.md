@@ -23,6 +23,9 @@ sera source add <source_type>
 
 # 3. Add a destination (destination-specific options like file paths / HTTP proxy + auth)
 sera dest add <dest_type>
+
+# 4. Watch live job & slice progress bars in terminal (optional --bell audio alerts)
+sera watch --bell
 ```
 
 ## Local Development via Symlink

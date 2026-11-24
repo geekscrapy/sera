@@ -83,8 +83,9 @@ Before instructing the user, silently call `sources` and `destinations` (if `.se
      sera dest add <dest_type> [--name default] [--auth-mode <mode>] [--opt KEY=VALUE ...]
      ```
    - Consult `./resources/destinations/<dest_type>.md` (or `sera dest types <dest_type>`) for exact options and auth modes.
-4. **Collect & Track (Agent MCP `collect` / `jobs` / `status` ↔ CLI `sera collect` / `sera jobs` / `sera status`)**
+4. **Collect & Track (Agent MCP `collect` / `jobs` / `status` ↔ CLI `sera collect` / `sera jobs` / `sera status` / `sera watch --bell`)**
    - Submit non-blocking full-event extraction jobs via MCP `collect` or CLI `sera collect`; SERA adaptively splits capped intervals, verifies `AES-256-GCM` spool batches, deduplicates via `uploaded_events`, and returns a `job_id` immediately for destination lookup.
+   - Analysts can run `sera watch --bell` in a terminal pane to watch live Rich progress bars for every running job and its slice sub-tasks (1 ding on arrival, 2 dings on completion, 3 dings on failure).
 
 ---
 
@@ -142,6 +143,9 @@ sera source add <source_type>
 
 # 3. Add a destination (destination-specific options like file paths / HTTP proxy + auth)
 sera dest add <dest_type>
+
+# 4. Watch live job & slice progress bars in terminal (optional --bell audio alerts)
+sera watch --bell
 ```
 
 ## Local Development via Symlink

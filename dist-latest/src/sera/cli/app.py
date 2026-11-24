@@ -16,6 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from sera import __app_name__, __version__
+from sera.cli.watch import run_job_watcher
 from sera.config import load_workspace_config, save_workspace_config
 from sera.core.models import JobRecord, JobSpec
 from sera.core.registry import DestinationRegistry, SourceRegistry
@@ -696,10 +697,21 @@ def cmd_collect(
 @app.command("jobs")
 def cmd_jobs(
     limit: int = typer.Option(25, "--limit", "-n"),
+    watch: bool = typer.Option(False, "--watch", help="Open live Rich job & slice progress monitor"),
+    bell: bool = typer.Option(
+        False,
+        "--bell",
+        help="Terminal bell in watch mode: 1 ding on new job, 2 dings on completion, 3 dings on failure",
+    ),
+    interval: float = typer.Option(0.5, "--interval", "-i", help="Refresh interval in seconds when `--watch` is active"),
     workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Check recent extraction jobs and uploaded event totals (mirrors MCP `jobs`)."""
+    """Check recent extraction jobs and uploaded event totals (mirrors MCP `jobs`; pass `--watch` for live UI)."""
+    if watch:
+        run_job_watcher(_ws(workspace), bell=bell, interval=interval, console=console)
+        return
+
     svc = SeraService(_ws(workspace))
     data = svc.check_jobs(limit=limit)
     if as_json:
@@ -729,6 +741,31 @@ def cmd_jobs(
             j["destination_target"],
         )
     console.print(tbl)
+
+
+@app.command("watch")
+def cmd_watch(
+    bell: bool = typer.Option(
+        False,
+        "--bell",
+        help="Ring terminal bell: 1 ding when a job arrives, 2 dings when completed, 3 dings if failed",
+    ),
+    interval: float = typer.Option(0.5, "--interval", "-i", help="Live poll interval in seconds"),
+    show_all: bool = typer.Option(False, "--all", "-a", help="Also show historical completed/failed jobs"),
+    max_slices: int = typer.Option(20, "--max-slices", help="Maximum slice sub-tasks shown under each job"),
+    exit_when_idle: bool = typer.Option(False, "--exit-when-idle", help="Exit automatically once all active jobs finish"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace", "-w", help="Engagement workspace directory"),
+) -> None:
+    """Live Rich interface tracking running jobs and their slice sub-tasks with optional `--bell` alerts."""
+    run_job_watcher(
+        _ws(workspace),
+        bell=bell,
+        interval=interval,
+        show_all=show_all,
+        max_slices_per_job=max_slices,
+        exit_when_idle=exit_when_idle,
+        console=console,
+    )
 
 
 @app.command("status")
