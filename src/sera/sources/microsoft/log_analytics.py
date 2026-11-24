@@ -17,9 +17,11 @@ from sera.core.models import (
     sha256_hex,
     utc_now_iso,
 )
-from sera.core.templates import TemplateRegistry, TemplateValidationError
 from sera.sources.microsoft.auth import MicrosoftAuthManager, SCOPE_LOG_ANALYTICS
+from sera.sources.microsoft.templates import MicrosoftTemplateEngine, TemplateValidationError
 
+
+LOG_ANALYTICS_BASE_URL = "https://api.loganalytics.azure.com/v1/workspaces"
 
 TRUNCATION_ERROR_TOKENS = (
     "PartialError",
@@ -38,7 +40,7 @@ async def fetch_log_analytics_slice(
     workspace_id: str,
     auth: MicrosoftAuthManager,
     http: SeraHttpClient,
-    templates: TemplateRegistry,
+    templates: MicrosoftTemplateEngine,
     *,
     time_column: str = "TimeGenerated",
     max_rows_ceiling: int = 500_000,
@@ -61,8 +63,9 @@ async def fetch_log_analytics_slice(
         include_item_id=True,
     )
 
-    url = f"https://api.loganalytics.io/v1/workspaces/{workspace_id.strip()}/query"
+    url = f"{LOG_ANALYTICS_BASE_URL}/{workspace_id.strip()}/query"
     headers = await auth.get_bearer_headers(spec.profile, SCOPE_LOG_ANALYTICS)
+    headers["Prefer"] = "wait=600"
     refresh_cb = lambda: auth.get_bearer_headers(spec.profile, SCOPE_LOG_ANALYTICS, force_refresh=True)
 
     try:
@@ -70,7 +73,10 @@ async def fetch_log_analytics_slice(
             "POST",
             url,
             headers=headers,
-            json_body={"query": kql},
+            json_body={
+                "query": kql,
+                "timespan": f"{start_iso}/{end_iso}",
+            },
             refresh_headers_on_401=refresh_cb,
         )
     except UpstreamApiError as exc:

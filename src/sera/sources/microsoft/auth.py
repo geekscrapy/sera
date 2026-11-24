@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 import msal
 import requests
 
@@ -16,7 +18,7 @@ from sera.config import NetworkConfig, sera_dir_for_workspace
 DEFAULT_GRAPH_POWERSHELL_CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
 
 SCOPE_GRAPH = "https://graph.microsoft.com/.default"
-SCOPE_LOG_ANALYTICS = "https://api.loganalytics.io/.default"
+SCOPE_LOG_ANALYTICS = "https://api.loganalytics.azure.com/.default"
 SCOPE_ARM = "https://management.azure.com/.default"
 
 
@@ -188,10 +190,27 @@ class MicrosoftAuthManager:
                     raise MicrosoftAuthError(f"Profile '{profile}' is missing client_secret")
             else:
                 key_path = Path(str(data.get("private_key_path", ""))).expanduser()
+                private_key_pem = key_path.read_text(encoding="utf-8")
+                cert_path_raw = str(data.get("public_certificate_path", "")).strip()
+                public_cert_pem = (
+                    Path(cert_path_raw).expanduser().read_text(encoding="utf-8")
+                    if cert_path_raw
+                    else ""
+                )
+                thumbprint = str(data.get("thumbprint", "")).strip()
+                if not thumbprint and public_cert_pem:
+                    cert_obj = x509.load_pem_x509_certificate(public_cert_pem.encode("utf-8"))
+                    thumbprint = cert_obj.fingerprint(hashes.SHA1()).hex()
+                if not thumbprint:
+                    raise MicrosoftAuthError(
+                        f"Profile '{profile}' requires 'thumbprint' (or 'public_certificate_path' to derive it)"
+                    )
                 credential = {
-                    "private_key": key_path.read_text(encoding="utf-8"),
-                    "thumbprint": str(data.get("thumbprint", "")),
+                    "private_key": private_key_pem,
+                    "thumbprint": thumbprint,
                 }
+                if public_cert_pem:
+                    credential["public_certificate"] = public_cert_pem
             app = msal.ConfidentialClientApplication(
                 client_id=client_id,
                 client_credential=credential,

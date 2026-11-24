@@ -1,4 +1,4 @@
-"""Customizable HTTP/HEC destination sink (`type = "http"`) for SIEM/lakehouse HTTP receivers."""
+"""Self-contained HTTP/HEC destination sink plugin (`type = "http"`)."""
 
 from __future__ import annotations
 
@@ -8,17 +8,28 @@ from typing import Any
 from sera.config import DestinationConfig, NetworkConfig
 from sera.core.http_client import SeraHttpClient
 from sera.core.models import JobRecord, utc_now_iso
-from sera.destinations.base import BaseDestinationSink
+from sera.destinations.base import BaseDestinationSink, SinkOptionSpec
 
 
 class HttpIngestDestination(BaseDestinationSink):
     """Forwards verified NDJSON batches to an HTTPS ingestion endpoint (`ndjson`, `json_array`, or `splunk_hec`)."""
 
     sink_type = "http"
+    required_packages = ("httpx[socks]>=0.27.0",)
+
+    @classmethod
+    def option_specs(cls) -> tuple[SinkOptionSpec, ...]:
+        return (
+            SinkOptionSpec("url", "HTTPS ingestion endpoint URL", required=True),
+            SinkOptionSpec("format", "Payload format: ndjson | json_array | splunk_hec", required=False, default="ndjson"),
+            SinkOptionSpec("bearer_token", "Optional Bearer authorization token", required=False, default="", secret=True),
+            SinkOptionSpec("hec_token", "Optional Splunk HEC authorization token", required=False, default="", secret=True),
+            SinkOptionSpec("jobs_url", "Optional URL to POST job completion manifests", required=False, default=""),
+        )
 
     def __init__(self, dest_config: DestinationConfig, network: NetworkConfig) -> None:
         super().__init__(dest_config, network)
-        opts = dest_config.options
+        opts = self.apply_defaults(dest_config.options)
         self.url = str(opts.get("url", "")).strip()
         if not self.url:
             raise ValueError(f"HTTP destination '{dest_config.name}' requires 'url'")

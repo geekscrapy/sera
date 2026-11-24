@@ -16,8 +16,8 @@ from sera.core.models import (
     sha256_hex,
     utc_now_iso,
 )
-from sera.core.templates import TemplateRegistry, TemplateValidationError
 from sera.sources.microsoft.auth import MicrosoftAuthManager, SCOPE_GRAPH
+from sera.sources.microsoft.templates import MicrosoftTemplateEngine, TemplateValidationError
 
 
 ENTRA_ENDPOINTS: dict[str, tuple[str, str]] = {
@@ -44,7 +44,7 @@ async def fetch_entra_slice(
     slice_end: datetime,
     auth: MicrosoftAuthManager,
     http: SeraHttpClient,
-    templates: TemplateRegistry,
+    templates: MicrosoftTemplateEngine,
     max_events_per_slice: int = 500_000,
 ) -> SliceResult:
     url, time_field = validate_entra_endpoint(spec.table_or_endpoint)
@@ -53,7 +53,7 @@ async def fetch_entra_slice(
     end_iso = format_utc_iso(slice_end)
 
     time_pred = f"{time_field} ge {start_iso} and {time_field} lt {end_iso}"
-    full_filter = f"({time_pred}) and ({extra_pred})" if extra_pred else time_pred
+    full_filter = f"{time_pred} and ({extra_pred})" if extra_pred else time_pred
 
     headers = await auth.get_bearer_headers(spec.profile, SCOPE_GRAPH)
     refresh_cb = lambda: auth.get_bearer_headers(spec.profile, SCOPE_GRAPH, force_refresh=True)

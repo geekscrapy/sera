@@ -1,13 +1,5 @@
-"""Destination sink exports."""
+"""Namespace root for SERA destination sink plugins (discovered dynamically by `DestinationRegistry`)."""
 
-from sera.destinations.base import BaseDestinationSink
-from sera.destinations.bigquery import BigQueryDestination
-from sera.destinations.http_sink import HttpIngestDestination
-from sera.destinations.jsonl import JsonlDirectoryDestination
+from sera.destinations.base import BaseDestinationSink, SinkOptionSpec
 
-__all__ = [
-    "BaseDestinationSink",
-    "BigQueryDestination",
-    "HttpIngestDestination",
-    "JsonlDirectoryDestination",
-]
+__all__ = ["BaseDestinationSink", "SinkOptionSpec"]

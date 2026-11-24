@@ -1,38 +1,83 @@
-"""Abstract base connector protocol for pluggable SERA log sources."""
+"""Self-contained source plugin contract (`BaseSourceConnector`).
+
+Every telemetry source (e.g. `microsoft`, `splunk`, `crowdstrike`, `wiz`) lives in its
+own package under `sera/sources/<name>/` (or registers via entry point `sera.sources`)
+and encapsulates all vendor auth, query templates, pagination, and runtime dependencies.
+"""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sera.config import WorkspaceConfig
 from sera.core.http_client import SeraHttpClient
 from sera.core.models import JobSpec, SliceResult
-from sera.core.templates import TemplateRegistry
+
+
+@dataclass(frozen=True)
+class AuthFieldSpec:
+    """Declarative specification for an authentication input field owned by a source plugin."""
+
+    name: str
+    description: str
+    required: bool = True
+    secret: bool = False
+    default: str = ""
+
+
+@dataclass(frozen=True)
+class AuthModeSpec:
+    """Declarative specification for an authentication mode supported by a source plugin."""
+
+    mode: str
+    description: str
+    fields: tuple[AuthFieldSpec, ...] = ()
 
 
 class BaseSourceConnector(ABC):
-    """Base interface for all SERA telemetry source connectors."""
+    """Self-contained source evidence plugin interface."""
 
     source_name: str = ""
+    required_packages: tuple[str, ...] = ()
 
     def __init__(self, workspace_dir: Path, config: WorkspaceConfig) -> None:
         self.workspace_dir = workspace_dir
         self.config = config
 
+    @classmethod
+    @abstractmethod
+    def auth_modes(cls) -> dict[str, AuthModeSpec]:
+        """Declare supported authentication modes and their input fields for the CLI."""
+
+    @abstractmethod
+    def configure_auth(
+        self,
+        profile: str,
+        mode: str,
+        values: dict[str, str],
+        on_message: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Configure and persist isolated credentials in `<workspace>/.sera/creds/`."""
+
     @abstractmethod
     def supported_sub_sources(self) -> dict[str, dict[str, Any]]:
-        """Return metadata map of supported `sub_source` names and their rules (zero schema sampling)."""
+        """Return metadata map of supported `sub_source`s and their rules (zero schema sampling)."""
+
+    @abstractmethod
+    def list_templates(self, sub_source: str = "") -> list[dict[str, Any]]:
+        """Return canonical full-event template metadata owned by this source plugin."""
 
     @abstractmethod
     def default_chunk_duration(self, sub_source: str) -> timedelta:
         """Return default initial slice interval size for `sub_source`."""
 
     @abstractmethod
-    def validate_job_spec(self, spec: JobSpec, templates: TemplateRegistry) -> None:
-        """Validate `sub_source`, `table_or_endpoint`, time bounds, and allowlisted template parameters."""
+    def validate_job_spec(self, spec: JobSpec) -> None:
+        """Validate `sub_source`, `table_or_endpoint`, time bounds, and plugin filter `params`."""
 
     @abstractmethod
     def check_auth_status(self, profile: str = "default") -> dict[str, Any]:
@@ -46,6 +91,5 @@ class BaseSourceConnector(ABC):
         slice_start: datetime,
         slice_end: datetime,
         http: SeraHttpClient,
-        templates: TemplateRegistry,
     ) -> SliceResult:
         """Fetch raw full events for `[slice_start, slice_end)` or report `SliceResult(truncated=True)`."""

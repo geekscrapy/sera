@@ -22,8 +22,8 @@ from sera.core.models import (
     sha256_hex,
     utc_now_iso,
 )
-from sera.core.templates import TemplateRegistry
 from sera.sources.microsoft.auth import MicrosoftAuthManager
+from sera.sources.microsoft.templates import MicrosoftTemplateEngine
 
 
 async def fetch_defender_timeline_slice(
@@ -33,7 +33,7 @@ async def fetch_defender_timeline_slice(
     slice_end: datetime,
     auth: MicrosoftAuthManager,
     http: SeraHttpClient,
-    templates: TemplateRegistry,
+    templates: MicrosoftTemplateEngine,
     *,
     page_size: int = 1000,
     max_events_per_slice: int = 250_000,

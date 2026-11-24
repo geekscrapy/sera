@@ -16,8 +16,8 @@ from sera.core.models import (
     sha256_hex,
     utc_now_iso,
 )
-from sera.core.templates import TemplateRegistry, TemplateValidationError
 from sera.sources.microsoft.auth import MicrosoftAuthManager, SCOPE_ARM
+from sera.sources.microsoft.templates import MicrosoftTemplateEngine, TemplateValidationError
 
 
 ARM_API_VERSION = "2015-04-01"
@@ -39,7 +39,7 @@ async def fetch_arm_activity_slice(
     subscription_id: str,
     auth: MicrosoftAuthManager,
     http: SeraHttpClient,
-    templates: TemplateRegistry,
+    templates: MicrosoftTemplateEngine,
 ) -> SliceResult:
     validate_arm_endpoint(spec.table_or_endpoint)
     if not subscription_id.strip():
@@ -59,7 +59,7 @@ async def fetch_arm_activity_slice(
 
     url = (
         f"https://management.azure.com/subscriptions/{subscription_id.strip()}"
-        f"/providers/microsoft.insights/eventtypes/management/values"
+        f"/providers/Microsoft.Insights/eventtypes/management/values"
     )
     params: dict[str, Any] | None = {
         "api-version": ARM_API_VERSION,
@@ -67,6 +67,7 @@ async def fetch_arm_activity_slice(
     }
 
     headers = await auth.get_bearer_headers(spec.profile, SCOPE_ARM)
+    headers["Prefer"] = "wait=75"
     refresh_cb = lambda: auth.get_bearer_headers(spec.profile, SCOPE_ARM, force_refresh=True)
 
     events: list[RawEventEnvelope] = []

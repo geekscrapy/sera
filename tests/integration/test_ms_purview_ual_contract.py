@@ -14,15 +14,17 @@ from sera.sources.microsoft.purview_ual import DEFAULT_PURVIEW_BASE
 from tests.integration.conftest import assert_required_fields_and_types, live_workspace_path
 
 
-PURVIEW_QUERY_JOB_CONTRACT = {"id": str, "status": str}
+PURVIEW_QUERY_JOB_CONTRACT = {"id": str, "status": str, "isRecordCountLimitExceeded": bool}
 PURVIEW_RECORD_ITEM_CONTRACT = {"id": str, "createdDateTime": str, "auditData": dict}
 
 
 def test_ms_purview_ual_wire_schema_contract() -> None:
     query_job = {
+        "@odata.type": "#microsoft.graph.security.auditLogQuery",
         "id": "8e1101d9-0000-4d00-a000-111111111111",
         "displayName": "SERA-diagnostic",
         "status": "succeeded",
+        "isRecordCountLimitExceeded": False,
         "filterStartDateTime": "2026-11-23T00:00:00Z",
         "filterEndDateTime": "2026-11-23T00:05:00Z",
     }

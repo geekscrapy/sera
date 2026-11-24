@@ -16,8 +16,8 @@ from sera.core.models import (
     sha256_hex,
     utc_now_iso,
 )
-from sera.core.templates import TemplateRegistry
 from sera.sources.microsoft.auth import MicrosoftAuthManager, SCOPE_GRAPH
+from sera.sources.microsoft.templates import MicrosoftTemplateEngine
 
 
 DEFENDER_HUNTING_URL = "https://graph.microsoft.com/v1.0/security/runHuntingQuery"
@@ -36,7 +36,7 @@ async def fetch_defender_hunting_slice(
     slice_end: datetime,
     auth: MicrosoftAuthManager,
     http: SeraHttpClient,
-    templates: TemplateRegistry,
+    templates: MicrosoftTemplateEngine,
     *,
     time_column: str = "Timestamp",
     max_rows_ceiling: int = 100_000,
@@ -54,6 +54,7 @@ async def fetch_defender_hunting_slice(
     )
 
     headers = await auth.get_bearer_headers(spec.profile, SCOPE_GRAPH)
+    headers["Content-Type"] = "application/json; charset=utf-8"
     refresh_cb = lambda: auth.get_bearer_headers(spec.profile, SCOPE_GRAPH, force_refresh=True)
 
     try:
@@ -61,7 +62,10 @@ async def fetch_defender_hunting_slice(
             "POST",
             DEFENDER_HUNTING_URL,
             headers=headers,
-            json_body={"Query": kql},
+            json_body={
+                "Query": kql,
+                "Timespan": f"{start_iso}/{end_iso}",
+            },
             refresh_headers_on_401=refresh_cb,
         )
     except UpstreamApiError as exc:

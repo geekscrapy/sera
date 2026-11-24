@@ -21,15 +21,15 @@ description: >-
 Before instructing the user, silently call `list_sources` and `list_destinations` (if `.sera/` is already initialized) to see which stage they are on, then walk them cleanly through the next step:
 
 1. **Init Setup (`sera init`) — *One-time per engagement workspace***
-   - Initializes `<workspace>/.sera/` (isolated config + SQLite ledger + upfront `uv` dependency check) and configures where logs will land (e.g., your GCP `CASE` BigQuery project, external JSONL mount, or HTTP/HEC endpoint).
-   - Give the user a ready-to-run command tailored to their target, e.g.:
-     `sera init --bq-project <CASE_GCP_PROJECT> --bq-dataset sera_raw`
-2. **Auth (`sera auth add ...`) — *Out-of-band in terminal (secrets never enter chat)***
-   - Guides the analyst to authenticate directly into `<workspace>/.sera/creds/`:
+   - Initializes `<workspace>/.sera/` (isolated config + SQLite ledger + upfront `uv` dependency check across all discovered source and destination plugins).
+   - Give the user a ready-to-run command tailored to their target destination plugin, e.g.:
+     `sera init --dest-type bigquery --dest-opt project_id=<CASE_GCP_PROJECT> --dest-opt dataset_id=sera_raw`
+2. **Auth (`sera auth add <source> ...`) — *Out-of-band in terminal (secrets never enter chat)***
+   - Guides the analyst to authenticate directly into `<workspace>/.sera/creds/` using any discovered source plugin:
      - Microsoft OAuth (App Registration secret/cert, Device-Code, or Browser):
-       `sera auth add microsoft --mode device-code --tenant-id <TENANT_ID>` (or `--mode secret`)
+       `sera auth add microsoft --mode device-code --opt tenant_id=<TENANT_ID>` (or `--mode secret`)
      - Microsoft 180-Day MDE Host Timeline (portal session):
-       `sera auth add microsoft-portal`
+       `sera auth add microsoft --mode portal-session --profile mde_portal`
 3. **Downloading (Agent MCP `submit_job` or CLI `sera collect`)**
    - Once initialized and authenticated, the user (or an Analysis Agent) simply describes what telemetry and time range are needed.
    - SERA uses safe full-event query templates, automatically splits busy time intervals so API row caps never truncate logs, and stages tamper-proof encrypted batches locally.

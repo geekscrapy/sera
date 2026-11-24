@@ -1,4 +1,4 @@
-"""Customizable Google BigQuery destination sink using atomic Batch Load jobs."""
+"""Self-contained Google BigQuery destination sink plugin."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from google.oauth2 import service_account
 
 from sera.config import DestinationConfig, NetworkConfig
 from sera.core.models import JobRecord, utc_now_iso
-from sera.destinations.base import BaseDestinationSink
+from sera.destinations.base import BaseDestinationSink, SinkOptionSpec
 
 
 EVENTS_SCHEMA: tuple[bigquery.SchemaField, ...] = (
@@ -53,9 +53,28 @@ JOBS_SCHEMA: tuple[bigquery.SchemaField, ...] = (
 
 
 class BigQueryDestination(BaseDestinationSink):
-    """Customizable BigQuery destination (`project_id`, `dataset_id`, table names, clustering, location)."""
+    """Self-contained BigQuery destination plugin using atomic Batch Load jobs."""
 
     sink_type = "bigquery"
+    required_packages = ("google-cloud-bigquery>=3.20.0",)
+
+    @classmethod
+    def option_specs(cls) -> tuple[SinkOptionSpec, ...]:
+        return (
+            SinkOptionSpec("project_id", "GCP CASE project_id", required=True),
+            SinkOptionSpec("dataset_id", "BigQuery dataset_id", required=False, default="sera_raw"),
+            SinkOptionSpec("events_table", "Events table name", required=False, default="events"),
+            SinkOptionSpec("jobs_table", "Collection jobs manifest table", required=False, default="collection_jobs"),
+            SinkOptionSpec("location", "BigQuery dataset location", required=False, default="US"),
+            SinkOptionSpec("partition_field", "DAY time-partition column", required=False, default="event_timestamp"),
+            SinkOptionSpec(
+                "cluster_fields",
+                "Clustering columns (up to 4)",
+                required=False,
+                default=["source", "sub_source", "table_or_endpoint"],
+            ),
+            SinkOptionSpec("credentials_file", "Optional Service Account JSON path", required=False, default=""),
+        )
 
     def __init__(
         self,
@@ -64,7 +83,7 @@ class BigQueryDestination(BaseDestinationSink):
         client_factory: Callable[[], bigquery.Client] | None = None,
     ) -> None:
         super().__init__(dest_config, network)
-        opts = dest_config.options
+        opts = self.apply_defaults(dest_config.options)
         self.project_id = str(opts.get("project_id", "")).strip()
         self.dataset_id = str(opts.get("dataset_id", "sera_raw")).strip()
         self.events_table = str(opts.get("events_table", "events")).strip()
@@ -111,6 +130,9 @@ class BigQueryDestination(BaseDestinationSink):
     def describe_target(self) -> str:
         return self.events_table_fqn
 
+    def format_lookup_hint(self, job_id: str) -> str:
+        return f"SELECT * FROM `{self.events_table_fqn}` WHERE job_id = '{job_id}'"
+
     def config_summary(self) -> dict[str, Any]:
         return {
             "name": self.dest_config.name,
@@ -123,7 +145,7 @@ class BigQueryDestination(BaseDestinationSink):
             "partition_field": self.partition_field,
             "cluster_fields": self.cluster_fields,
             "uses_credentials_file": bool(self.credentials_file),
-            "lookup_example": f"SELECT * FROM `{self.events_table_fqn}` WHERE job_id = '<job_id>'",
+            "lookup_example": self.format_lookup_hint("<job_id>"),
         }
 
     def _ensure_ready_sync(self) -> None:

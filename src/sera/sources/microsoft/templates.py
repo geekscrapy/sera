@@ -1,11 +1,4 @@
-"""Single canonical full-event query template per upstream API dialect (zero regex blacklisting).
-
-Rather than maintaining multiple overlapping named templates per source, each `sub_source`
-has ONE canonical full-event query template. Passing `params={}` downloads every event in
-`[start_time, end_time)`; passing typed filter fields (`equals`, `in_list`, `contains`,
-`startswith`, or Purview/MDE native filter keys) safely renders server-side predicates while
-guaranteeing 100% full events with zero projection or summarization.
-"""
+"""Self-contained query templates for the `microsoft` source plugin (OData, Purview, KQL, MDE, ARM)."""
 
 from __future__ import annotations
 
@@ -14,34 +7,15 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from sera.core.template_primitives import (
+    TemplateValidationError,
+    validate_field_ident,
+    validate_table_ident,
+)
 
-FIELD_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_./-]{0,127}$")
-TABLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,127}$")
+
 MACHINE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
-
-ARM_ALLOWED_FIELDS = frozenset({"caller", "resourceGroupName", "resourceType", "resourceId", "status"})
-
-
-class TemplateValidationError(ValueError):
-    """Raised when field identifiers, table names, or typed template parameters are invalid."""
-
-
-def validate_field_ident(name: str) -> str:
-    cleaned = name.strip()
-    if not FIELD_IDENT_RE.match(cleaned):
-        raise TemplateValidationError(
-            f"Invalid field identifier '{name}'. Only alphanumeric, '_', '.', '/', '-' characters are allowed."
-        )
-    return cleaned
-
-
-def validate_table_ident(name: str) -> str:
-    cleaned = name.strip()
-    if not TABLE_IDENT_RE.match(cleaned):
-        raise TemplateValidationError(
-            f"Invalid table/endpoint identifier '{name}'. Only alphanumeric, '_', '-' characters are allowed."
-        )
-    return cleaned
+ARM_ALLOWED_FIELDS = frozenset({"resourceGroupName", "resourceUri", "resourceProvider", "correlationId"})
 
 
 def validate_machine_id(machine_id: str) -> str:
@@ -68,11 +42,14 @@ def odata_literal(val: Any) -> str:
 
 
 def odata_in_list(field_name: str, values: list[Any]) -> str:
+    """Expand list membership into `eq` disjunctions supported across all Entra `/auditLogs/*` endpoints."""
     ident = validate_field_ident(field_name)
     if not isinstance(values, list) or not values:
         raise TemplateValidationError(f"Parameter list for '{field_name}' must be a non-empty list")
-    encoded = ", ".join(odata_literal(v) for v in values)
-    return f"{ident} in ({encoded})"
+    if len(values) == 1:
+        return f"{ident} eq {odata_literal(values[0])}"
+    parts = [f"{ident} eq {odata_literal(v)}" for v in values]
+    return "(" + " or ".join(parts) + ")"
 
 
 def kql_literal(val: Any) -> str:
@@ -99,7 +76,7 @@ def kql_dynamic_list(values: list[Any]) -> str:
 
 @dataclass(frozen=True)
 class CanonicalTemplateSpec:
-    """Describes the single canonical query template and allowed `params` for a `sub_source`."""
+    """Describes the single canonical query template and allowed `params` for a Microsoft `sub_source`."""
 
     sub_source: str
     dialect: str
@@ -108,6 +85,7 @@ class CanonicalTemplateSpec:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "source": "microsoft",
             "sub_source": self.sub_source,
             "dialect": self.dialect,
             "template_preview": self.template_preview,
@@ -119,7 +97,7 @@ SURFACE_TEMPLATES: dict[str, CanonicalTemplateSpec] = {
     "entra": CanonicalTemplateSpec(
         sub_source="entra",
         dialect="odata",
-        template_preview="$filter=(<time_field> ge <start> and <time_field> lt <end>)[ and (<typed_predicates>)]",
+        template_preview="$filter=<time_field> ge <start> and <time_field> lt <end>[ and (<typed_predicates>)]",
         param_schema={
             "equals": "optional dict[field_name, str|int|bool]",
             "in_list": "optional dict[field_name, list[str|int]] (e.g. {'userPrincipalName': ['alice@contoso.com']})",
@@ -130,7 +108,7 @@ SURFACE_TEMPLATES: dict[str, CanonicalTemplateSpec] = {
     "purview_ual": CanonicalTemplateSpec(
         sub_source="purview_ual",
         dialect="purview",
-        template_preview="POST /security/auditLog/queries {filterStartDateTime, filterEndDateTime, ...optional filters}",
+        template_preview="POST /v1.0/security/auditLog/queries {filterStartDateTime, filterEndDateTime, ...optional filters}",
         param_schema={
             "users": "optional list[str] -> userPrincipalNameFilters",
             "ips": "optional list[str] -> ipAddressFilters",
@@ -138,6 +116,7 @@ SURFACE_TEMPLATES: dict[str, CanonicalTemplateSpec] = {
             "services": "optional list[str] -> serviceFilters",
             "record_types": "optional list[str] -> recordTypeFilters",
             "object_ids": "optional list[str] -> objectIdFilters",
+            "administrative_unit_ids": "optional list[str] -> administrativeUnitIdFilters",
             "keyword": "optional str -> keywordFilter",
         },
     ),
@@ -175,32 +154,30 @@ SURFACE_TEMPLATES: dict[str, CanonicalTemplateSpec] = {
     "arm_activity": CanonicalTemplateSpec(
         sub_source="arm_activity",
         dialect="arm_odata",
-        template_preview="$filter=eventTimestamp ge '<start>' and eventTimestamp le '<end>'[ and <field> eq '<val>']",
+        template_preview="$filter=eventTimestamp ge '<start>' and eventTimestamp le '<end>'[ and <single_allowed_field> eq '<val>']",
         param_schema={
-            "equals": "optional dict[caller|resourceGroupName|resourceType|resourceId|status, str]",
+            "equals": "optional single-entry dict[resourceGroupName|resourceUri|resourceProvider|correlationId, str]",
         },
     ),
 }
 
 
-class TemplateRegistry:
-    """Renders the single canonical full-event query template for each `sub_source`."""
+class MicrosoftTemplateEngine:
+    """Renders the single canonical full-event query template for each Microsoft `sub_source`."""
 
     def list_templates(self, sub_source: str = "") -> list[dict[str, Any]]:
         if sub_source:
             if sub_source not in SURFACE_TEMPLATES:
-                raise TemplateValidationError(f"Unknown sub_source '{sub_source}'")
+                raise TemplateValidationError(f"Unknown Microsoft sub_source '{sub_source}'")
             return [SURFACE_TEMPLATES[sub_source].to_dict()]
         return [spec.to_dict() for spec in SURFACE_TEMPLATES.values()]
 
     def render_odata_predicate(self, sub_source: str, params: dict[str, Any]) -> str:
-        """Render optional OData predicate (`params={}` -> `""` -> all events in slice)."""
         if not params:
             return ""
         return _render_structured_odata(params, arm_mode=(sub_source == "arm_activity"))
 
     def render_purview_filters(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Render optional Purview Graph `auditLogQuery` filter payload (`params={}` -> `{}`)."""
         if not params:
             return {}
         mapping = {
@@ -210,6 +187,7 @@ class TemplateRegistry:
             "services": "serviceFilters",
             "record_types": "recordTypeFilters",
             "object_ids": "objectIdFilters",
+            "administrative_unit_ids": "administrativeUnitIdFilters",
         }
         allowed_keys = set(mapping) | {"keyword"}
         unknown = set(params) - allowed_keys
@@ -235,7 +213,6 @@ class TemplateRegistry:
         params: dict[str, Any],
         include_item_id: bool = False,
     ) -> str:
-        """Render the single canonical full-row KQL query for `table_name`."""
         if sub_source not in {"log_analytics", "defender_hunting"}:
             raise TemplateValidationError(f"Unsupported KQL sub_source '{sub_source}'")
         safe_table = validate_table_ident(table_name)
@@ -256,7 +233,6 @@ class TemplateRegistry:
         machine_id: str,
         params: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
-        """Validate `machine_id` and optional MDE host timeline filter parameters."""
         safe_machine = validate_machine_id(machine_id)
         if not params:
             return safe_machine, {}
@@ -305,7 +281,13 @@ def _render_structured_odata(params: dict[str, Any], arm_mode: bool = False) -> 
             )
         return ident
 
-    for field_name, val in (params.get("equals") or {}).items():
+    eq_map = params.get("equals") or {}
+    if arm_mode and len(eq_map) > 1:
+        raise TemplateValidationError(
+            "ARM Activity Logs REST $filter allows at most ONE additional equality filter "
+            "(resourceGroupName, resourceUri, resourceProvider, or correlationId)."
+        )
+    for field_name, val in eq_map.items():
         ident = _chk_field(field_name)
         clauses.append(f"{ident} eq {odata_literal(val)}")
 

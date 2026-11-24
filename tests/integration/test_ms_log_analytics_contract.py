@@ -9,6 +9,7 @@ import pytest
 from sera.config import load_workspace_config
 from sera.core.http_client import SeraHttpClient
 from sera.sources.microsoft.auth import MicrosoftAuthManager, SCOPE_LOG_ANALYTICS
+from sera.sources.microsoft.log_analytics import LOG_ANALYTICS_BASE_URL
 from tests.integration.conftest import assert_required_fields_and_types, live_workspace_path
 
 
@@ -53,9 +54,9 @@ async def test_live_ms_log_analytics_query_contract() -> None:
     async with SeraHttpClient(cfg.network) as http:
         resp = await http.request_json(
             "POST",
-            f"https://api.loganalytics.io/v1/workspaces/{law_id}/query",
-            headers=headers,
-            json_body={"query": "Usage | take 1"},
+            f"{LOG_ANALYTICS_BASE_URL}/{law_id}/query",
+            headers={**headers, "Prefer": "wait=60"},
+            json_body={"query": "Usage | take 1", "timespan": "PT1H"},
         )
     assert_required_fields_and_types(resp, LAW_RESPONSE_CONTRACT, "LiveLogAnalyticsResponse")
     assert resp["tables"], "Expected at least one table in Log Analytics response"

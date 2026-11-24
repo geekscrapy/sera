@@ -1,4 +1,4 @@
-"""SERA MCP Server — full parity adapter over `SeraService`."""
+"""SERA MCP Server — plugin-agnostic parity adapter over `SeraService`."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 try:
     from mcp.server import MCPServer
-except ImportError:  # pragma: no cover - fallback for older mcp 1.x environments
+except ImportError:  # pragma: no cover
     from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[no-redef]
 
 from sera import __app_name__, __version__
@@ -26,9 +26,9 @@ def create_mcp_server(default_workspace: Path | None = None) -> tuple[MCPServer,
         version=__version__,
         instructions=(
             "SERA (Secure Extraction for Response Agents) downloads full, unsummarized forensic telemetry "
-            "using allowlisted query templates, encrypts batches in an ephemeral spool, and uploads them "
-            "to the engagement's configured destination. Schema sampling is disabled. Use `submit_job` "
-            "(non-blocking) to get a `job_id`, and `check_jobs` to track upload completion."
+            "from registered source plugins into configured destination sink plugins using canonical "
+            "full-event templates and ephemeral AES-256-GCM spooling. Schema sampling is disabled. "
+            "Use `submit_job` (non-blocking) to obtain a `job_id`, and `check_jobs` to track upload completion."
         ),
     )
 
@@ -39,7 +39,7 @@ def create_mcp_server(default_workspace: Path | None = None) -> tuple[MCPServer,
     @server.tool(
         name="submit_job",
         description=(
-            "Submit a non-blocking forensic log extraction job using an allowlisted query template. "
+            "Submit a non-blocking forensic log extraction job to a registered source plugin. "
             "Returns `job_id` immediately (use `job_id` to look up uploaded logs in the destination target)."
         ),
     )
@@ -105,7 +105,7 @@ def create_mcp_server(default_workspace: Path | None = None) -> tuple[MCPServer,
     @server.tool(
         name="list_sources",
         description=(
-            "List configured telemetry sources, supported `sub_source`s, and auth readiness status. "
+            "List discovered source plugins, supported `sub_source`s, auth modes, and profile readiness. "
             "Never exposes secret values or customer schema samples."
         ),
     )
@@ -115,7 +115,7 @@ def create_mcp_server(default_workspace: Path | None = None) -> tuple[MCPServer,
 
     @server.tool(
         name="list_destinations",
-        description="List configured customizable destinations and target coordinates for this engagement.",
+        description="List configured destination sinks and discovered destination plugin types.",
     )
     async def list_destinations(workspace_dir: str = "") -> dict[str, Any]:
         service = _svc(workspace_dir)
@@ -123,14 +123,15 @@ def create_mcp_server(default_workspace: Path | None = None) -> tuple[MCPServer,
 
     @server.tool(
         name="list_templates",
-        description="List allowlisted parameterized query templates and their typed parameter schemas.",
+        description="List the canonical full-event query template and allowed filter `params` per source/sub_source.",
     )
     async def list_templates(
+        source: str = "",
         sub_source: str = "",
         workspace_dir: str = "",
     ) -> list[dict[str, Any]]:
         service = _svc(workspace_dir)
-        return service.list_templates(sub_source=sub_source.strip())
+        return service.list_templates(source=source.strip(), sub_source=sub_source.strip())
 
     return server, pool
 

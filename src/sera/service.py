@@ -1,4 +1,9 @@
-"""Unified SERA orchestration service powering both the Rich CLI and the MCP server."""
+"""Plugin-agnostic SERA orchestration service powering both the Rich CLI and the MCP server.
+
+This module has zero hardcoded knowledge of concrete sources (e.g. `microsoft`) or concrete
+destination sinks (e.g. `bigquery`). All source and destination plugins are discovered
+dynamically via `SourceRegistry` and `DestinationRegistry`.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from sera import REQUIRED_UV_PACKAGES
+from sera import CORE_UV_PACKAGES
 from sera.config import (
     DestinationConfig,
     NetworkConfig,
@@ -23,26 +28,41 @@ from sera.core.engine import CollectionEngine
 from sera.core.models import JobRecord, JobSpec, JobStatus
 from sera.core.registry import DestinationRegistry, SourceRegistry
 from sera.core.spool import EphemeralSpoolManager
-from sera.core.templates import TemplateRegistry
 from sera.destinations.base import BaseDestinationSink
 from sera.sources.base import BaseSourceConnector
-from sera.sources.microsoft.connector import MicrosoftSourceConnector
 
 
-def ensure_uv_dependencies(workspace_dir: Path) -> dict[str, Any]:
-    """Ensure all upfront SERA libraries are installed into `.venv` via `uv`."""
+def collect_required_uv_packages(
+    sources: SourceRegistry | None = None,
+    destinations: DestinationRegistry | None = None,
+) -> list[str]:
+    """Aggregate core framework packages plus `required_packages` declared by every discovered plugin."""
+    src_reg = sources or SourceRegistry()
+    dst_reg = destinations or DestinationRegistry()
+    combined = set(CORE_UV_PACKAGES) | set(src_reg.required_packages()) | set(dst_reg.required_packages())
+    return sorted(combined)
+
+
+def ensure_uv_dependencies(
+    workspace_dir: Path,
+    sources: SourceRegistry | None = None,
+    destinations: DestinationRegistry | None = None,
+) -> dict[str, Any]:
+    """Ensure all upfront core and plugin libraries are installed into `.venv` via `uv`."""
     uv_bin = shutil.which("uv")
     local_venv_py = workspace_dir / ".venv" / "bin" / "python"
     target_python = str(local_venv_py) if local_venv_py.exists() else sys.executable
+    packages = collect_required_uv_packages(sources, destinations)
 
     if not uv_bin:
         return {
             "synced": False,
             "python": target_python,
+            "packages": packages,
             "reason": "`uv` binary not found on PATH; using active environment packages.",
         }
 
-    cmd = [uv_bin, "pip", "install", "--python", target_python, *REQUIRED_UV_PACKAGES]
+    cmd = [uv_bin, "pip", "install", "--python", target_python, *packages]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise RuntimeError(
@@ -51,68 +71,63 @@ def ensure_uv_dependencies(workspace_dir: Path) -> dict[str, Any]:
     return {
         "synced": True,
         "python": target_python,
-        "packages": list(REQUIRED_UV_PACKAGES),
+        "packages": packages,
     }
 
 
 def initialize_workspace(
     workspace_dir: Path,
     *,
-    destination_name: str = "bigquery",
-    destination_type: str = "bigquery",
+    destination_type: str,
+    destination_name: str = "default",
     destination_options: dict[str, Any] | None = None,
+    source_defaults: dict[str, dict[str, Any]] | None = None,
     proxy_url: str = "",
     ca_bundle: str = "",
     verify_tls: bool = True,
-    default_workspace_id: str = "",
-    default_subscription_id: str = "",
     batch_size: int = 5000,
     sync_uv_deps: bool = True,
+    source_registry: SourceRegistry | None = None,
+    destination_registry: DestinationRegistry | None = None,
 ) -> dict[str, Any]:
-    """Initialize `<workspace>/.sera/` (`config.toml`, `sera.sqlite`, `creds/`, `spool/`, `templates/`)."""
+    """Initialize `<workspace>/.sera/` using plugin-supplied defaults and validate destination configuration."""
     ws = workspace_dir.resolve()
     sdir = sera_dir_for_workspace(ws)
     for sub in ("creds", "spool"):
         (sdir / sub).mkdir(parents=True, exist_ok=True)
 
-    opts = dict(destination_options or {})
-    if destination_type == "bigquery":
-        opts.setdefault("dataset_id", "sera_raw")
-        opts.setdefault("events_table", "events")
-        opts.setdefault("jobs_table", "collection_jobs")
-        opts.setdefault("location", "US")
-        opts.setdefault("partition_field", "event_timestamp")
-        opts.setdefault("cluster_fields", ["source", "sub_source", "table_or_endpoint"])
+    src_reg = source_registry or SourceRegistry()
+    dst_reg = destination_registry or DestinationRegistry()
+    sink_cls = dst_reg.get_class(destination_type)
+    normalized_opts = sink_cls.apply_defaults(dict(destination_options or {}))
 
-    source_defaults: dict[str, dict[str, Any]] = {}
-    ms_defs: dict[str, Any] = {}
-    if default_workspace_id.strip():
-        ms_defs["default_workspace_id"] = default_workspace_id.strip()
-    if default_subscription_id.strip():
-        ms_defs["default_subscription_id"] = default_subscription_id.strip()
-    if ms_defs:
-        source_defaults["microsoft"] = ms_defs
+    dest_cfg = DestinationConfig(
+        name=destination_name,
+        type=destination_type,
+        options=normalized_opts,
+    )
+    net_cfg = NetworkConfig(
+        proxy_url=proxy_url.strip(),
+        ca_bundle=ca_bundle.strip(),
+        verify_tls=verify_tls,
+    )
+    # Validate options via the destination plugin before persisting config.toml
+    dst_reg.create(dest_cfg, net_cfg)
 
     cfg = WorkspaceConfig(
         default_destination=destination_name,
         batch_size=batch_size,
-        network=NetworkConfig(
-            proxy_url=proxy_url.strip(),
-            ca_bundle=ca_bundle.strip(),
-            verify_tls=verify_tls,
-        ),
-        destinations={
-            destination_name: DestinationConfig(
-                name=destination_name,
-                type=destination_type,
-                options=opts,
-            )
-        },
-        source_defaults=source_defaults,
+        network=net_cfg,
+        destinations={destination_name: dest_cfg},
+        source_defaults=dict(source_defaults or {}),
     )
     cfg_path = save_workspace_config(ws, cfg)
     db = SeraDatabase(sdir / "sera.sqlite")
-    uv_info = ensure_uv_dependencies(ws) if sync_uv_deps else {"synced": False, "reason": "skipped"}
+    uv_info = (
+        ensure_uv_dependencies(ws, src_reg, dst_reg)
+        if sync_uv_deps
+        else {"synced": False, "reason": "skipped"}
+    )
 
     return {
         "workspace_dir": str(ws),
@@ -120,6 +135,7 @@ def initialize_workspace(
         "config_path": str(cfg_path),
         "sqlite_path": str(db.db_path),
         "default_destination": destination_name,
+        "destination_type": destination_type,
         "uv": uv_info,
     }
 
@@ -142,12 +158,8 @@ class SeraService:
         self.config = load_workspace_config(self.workspace_dir)
         self.db = SeraDatabase(self.sera_dir / "sera.sqlite")
         self.spool = EphemeralSpoolManager(self.sera_dir / "spool")
-        self.templates = TemplateRegistry()
 
         self.sources = source_registry or SourceRegistry()
-        if "microsoft" not in self.sources.names():
-            self.sources.register(MicrosoftSourceConnector)
-
         self.destinations = destination_registry or DestinationRegistry()
         self._sink_override = sink_override
         self._connector_override = connector_override
@@ -171,8 +183,34 @@ class SeraService:
         dest_cfg = self.config.get_destination(destination_name)
         return self.destinations.create(dest_cfg, self.config.network)
 
+    def configure_source_auth(
+        self,
+        source_name: str,
+        profile: str,
+        mode: str,
+        values: dict[str, str],
+        on_message: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Delegate credential onboarding to the target source plugin and record non-secret metadata."""
+        self.reload_config()
+        connector = self.get_connector(source_name)
+        receipt = connector.configure_auth(
+            profile=profile,
+            mode=mode,
+            values=values,
+            on_message=on_message,
+        )
+        self.db.upsert_auth_profile(
+            source=source_name,
+            profile=profile,
+            auth_mode=str(receipt.get("auth_mode", mode)),
+            tenant_id=str(receipt.get("tenant_id", "")),
+            client_id=str(receipt.get("client_id", "")),
+        )
+        return receipt
+
     def list_sources(self) -> dict[str, Any]:
-        """List registered sources, sub_sources, and auth readiness (zero schema sampling)."""
+        """List discovered source plugins, sub_sources, auth modes, and readiness (zero schema sampling)."""
         self.reload_config()
         stored_profiles = self.db.list_auth_profiles()
         result: dict[str, Any] = {}
@@ -182,13 +220,17 @@ class SeraService:
             profiles_status = [conn.check_auth_status(p) for p in prof_names]
             result[sname] = {
                 "sub_sources": conn.supported_sub_sources(),
+                "auth_modes": {
+                    m: {"description": spec.description, "fields": [f.name for f in spec.fields]}
+                    for m, spec in conn.auth_modes().items()
+                },
                 "profiles": profiles_status,
                 "defaults": self.config.source_defaults.get(sname, {}),
             }
         return result
 
     def list_destinations(self) -> dict[str, Any]:
-        """List configured destinations and registered sink types."""
+        """List configured destinations and all discovered destination sink plugins."""
         self.reload_config()
         configured: dict[str, Any] = {}
         for name, dcfg in self.config.destinations.items():
@@ -200,12 +242,20 @@ class SeraService:
             "configured": configured,
         }
 
-    def list_templates(self, sub_source: str = "") -> list[dict[str, Any]]:
+    def list_templates(self, source: str = "", sub_source: str = "") -> list[dict[str, Any]]:
+        """Query discovered source plugins for their canonical full-event templates."""
         self.reload_config()
-        return self.templates.list_templates(sub_source=sub_source)
+        target_sources = [source] if source else self.sources.names()
+        items: list[dict[str, Any]] = []
+        for sname in target_sources:
+            conn = self.get_connector(sname)
+            if sub_source and sub_source not in conn.supported_sub_sources():
+                continue
+            items.extend(conn.list_templates(sub_source=sub_source))
+        return items
 
     def enqueue_job(self, spec: JobSpec) -> dict[str, Any]:
-        """Validate and create a pending job in `sera.sqlite`, returning its `job_id` and lookup metadata."""
+        """Validate and create a pending job in `sera.sqlite`, returning `job_id` and plugin lookup hint."""
         self.reload_config()
         connector = self.get_connector(spec.source)
         sink = self.get_sink(spec.destination)
@@ -213,21 +263,14 @@ class SeraService:
             config=self.config,
             db=self.db,
             spool=self.spool,
-            templates=self.templates,
         )
         job_id = engine.enqueue_job(spec, connector, sink)
-        target = sink.describe_target()
-        lookup_hint = (
-            f"SELECT * FROM `{target}` WHERE job_id = '{job_id}'"
-            if sink.sink_type == "bigquery"
-            else f"job_id={job_id} in {target}"
-        )
         return {
             "job_id": job_id,
             "status": JobStatus.PENDING.value,
             "destination_name": sink.dest_config.name,
-            "destination_target": target,
-            "lookup_hint": lookup_hint,
+            "destination_target": sink.describe_target(),
+            "lookup_hint": sink.format_lookup_hint(job_id),
         }
 
     async def execute_enqueued_job(
@@ -243,7 +286,6 @@ class SeraService:
             config=self.config,
             db=self.db,
             spool=self.spool,
-            templates=self.templates,
         )
         return await engine.execute_job(
             job_id=job_id,
@@ -265,11 +307,9 @@ class SeraService:
         try:
             await self.execute_enqueued_job(job_id)
         except Exception:
-            # Error is already persisted on `jobs.error_message` and `job_slices.last_error` in sera.sqlite
             pass
 
     def check_jobs(self, job_id: str = "", include_slices: bool = False, limit: int = 25) -> dict[str, Any]:
-        """Non-blocking progress & completion summary lookup used by both CLI and MCP."""
         if job_id.strip():
             rec = self.db.get_job(job_id.strip())
             out = rec.to_summary_dict()
@@ -298,18 +338,15 @@ class SeraService:
         }
 
     def prepare_resume(self, job_id: str) -> JobRecord:
-        """Reset uncommitted (`in_progress`/`failed`) slices to `pending` while keeping uploaded slices intact."""
         job = self.db.get_job(job_id)
         if job.status == JobStatus.COMPLETED:
             return job
-        # Purge any unreadable `.enc` spool leftovers for this job before re-fetching uncommitted slices
         for orphan in self.spool.spool_dir.glob(f"{job_id}_*.enc"):
             orphan.unlink(missing_ok=True)
         self.db.reset_interrupted_slices(job_id=job_id)
         return self.db.get_job(job_id)
 
     def resume_job_async(self, job_id: str) -> dict[str, Any]:
-        """Non-blocking resume for MCP: resets uncommitted slices and schedules background execution."""
         job = self.prepare_resume(job_id)
         if job.status == JobStatus.COMPLETED:
             return {"job_id": job_id, "status": "completed", "message": "Job is already completed."}
@@ -323,7 +360,6 @@ class SeraService:
         }
 
     async def wait_all_background_tasks(self) -> None:
-        """Await any active background tasks (useful in tests and graceful shutdown)."""
         tasks = list(self._background_tasks.values())
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

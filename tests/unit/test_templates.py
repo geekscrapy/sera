@@ -1,21 +1,22 @@
-"""Unit tests for SERA's single canonical full-event query template per surface."""
+"""Unit tests for the `microsoft` plugin's canonical full-event query template engine."""
 
 from __future__ import annotations
 
 import pytest
 
-from sera.core.templates import TemplateRegistry, TemplateValidationError
+from sera.core.template_primitives import TemplateValidationError
+from sera.sources.microsoft.templates import MicrosoftTemplateEngine
 
 
-def test_canonical_odata_template_escapes_values_and_rejects_bad_identifiers() -> None:
-    reg = TemplateRegistry()
+def test_canonical_odata_template_escapes_values_and_expands_or_disjunctions() -> None:
+    reg = MicrosoftTemplateEngine()
     assert reg.render_odata_predicate("entra", {}) == ""
 
     pred = reg.render_odata_predicate(
         "entra",
         {"in_list": {"userPrincipalName": ["alice@contoso.com", "bob.o'brien@contoso.com"]}},
     )
-    assert pred == "userPrincipalName in ('alice@contoso.com', 'bob.o''brien@contoso.com')"
+    assert pred == "(userPrincipalName eq 'alice@contoso.com' or userPrincipalName eq 'bob.o''brien@contoso.com')"
 
     # Attempt to inject $select or query operators via field identifier
     with pytest.raises(TemplateValidationError):
@@ -26,7 +27,7 @@ def test_canonical_odata_template_escapes_values_and_rejects_bad_identifiers() -
 
 
 def test_canonical_kql_template_preserves_pipes_inside_string_values_and_blocks_column_injection() -> None:
-    reg = TemplateRegistry()
+    reg = MicrosoftTemplateEngine()
     kql = reg.render_kql_query(
         sub_source="defender_hunting",
         table_name="DeviceProcessEvents",
@@ -67,25 +68,40 @@ def test_canonical_kql_template_preserves_pipes_inside_string_values_and_blocks_
         )
 
 
-def test_single_canonical_template_per_sub_source_and_strict_params() -> None:
-    reg = TemplateRegistry()
-    # Exactly 1 canonical template per sub_source
+def test_purview_arm_strict_filter_rules_and_mde_timeline_validation() -> None:
+    reg = MicrosoftTemplateEngine()
     for sub in ("entra", "purview_ual", "log_analytics", "defender_hunting", "defender_timeline", "arm_activity"):
         specs = reg.list_templates(sub_source=sub)
         assert len(specs) == 1
         assert specs[0]["sub_source"] == sub
 
     purview = reg.render_purview_filters(
-        {"users": ["admin@contoso.com"], "ips": ["203.0.113.5"], "operations": ["FileDownloaded"]},
+        {
+            "users": ["admin@contoso.com"],
+            "ips": ["203.0.113.5"],
+            "operations": ["FileDownloaded"],
+            "administrative_unit_ids": ["au-1"],
+        },
     )
     assert purview == {
         "userPrincipalNameFilters": ["admin@contoso.com"],
         "ipAddressFilters": ["203.0.113.5"],
         "operationFilters": ["FileDownloaded"],
+        "administrativeUnitIdFilters": ["au-1"],
     }
 
+    # ARM strictly allows at most ONE of resourceGroupName, resourceUri, resourceProvider, correlationId
+    assert (
+        reg.render_odata_predicate("arm_activity", {"equals": {"resourceGroupName": "rg-prod"}})
+        == "resourceGroupName eq 'rg-prod'"
+    )
     with pytest.raises(TemplateValidationError):
-        reg.render_odata_predicate("arm_activity", {"equals": {"unsupportedField": "val"}})
+        reg.render_odata_predicate("arm_activity", {"equals": {"caller": "ops@contoso.com"}})
+    with pytest.raises(TemplateValidationError):
+        reg.render_odata_predicate(
+            "arm_activity",
+            {"equals": {"resourceGroupName": "rg-prod", "resourceProvider": "Microsoft.Compute"}},
+        )
 
     machine_id, opts = reg.render_mde_timeline_params(
         "0123456789abcdef0123456789abcdef01234567",

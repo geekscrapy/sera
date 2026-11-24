@@ -14,7 +14,7 @@ from sera.config import DestinationConfig, NetworkConfig
 from sera.core.db import SeraDatabase
 from sera.core.models import JobRecord, JobStatus, RawEventEnvelope, canonical_raw_json, sha256_hex, utc_now_iso
 from sera.destinations.bigquery import BigQueryDestination
-from sera.destinations.http_sink import HttpIngestDestination
+from sera.destinations.http import HttpIngestDestination
 from sera.destinations.jsonl import JsonlDirectoryDestination
 
 

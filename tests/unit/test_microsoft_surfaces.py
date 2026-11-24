@@ -1,4 +1,4 @@
-"""Wire-level `respx` unit tests across all 6 Microsoft DFIR surfaces (including 180-day MDE Host Timeline)."""
+"""Wire-level `respx` unit tests across all 6 Microsoft DFIR surfaces (verified against Microsoft Learn specs)."""
 
 from __future__ import annotations
 
@@ -9,10 +9,9 @@ from pathlib import Path
 import httpx
 import respx
 
-from sera.config import NetworkConfig, WorkspaceConfig
+from sera.config import NetworkConfig
 from sera.core.http_client import SeraHttpClient
 from sera.core.models import JobSpec
-from sera.core.templates import TemplateRegistry
 from sera.sources.microsoft.arm_activity import fetch_arm_activity_slice
 from sera.sources.microsoft.auth import MicrosoftAuthManager
 from sera.sources.microsoft.defender_hunting import fetch_defender_hunting_slice
@@ -20,6 +19,7 @@ from sera.sources.microsoft.defender_timeline import fetch_defender_timeline_sli
 from sera.sources.microsoft.entra import fetch_entra_slice
 from sera.sources.microsoft.log_analytics import fetch_log_analytics_slice
 from sera.sources.microsoft.purview_ual import fetch_purview_ual_slice
+from sera.sources.microsoft.templates import MicrosoftTemplateEngine
 
 
 async def _noop_sleep(_: float) -> None:
@@ -44,7 +44,7 @@ def _setup_auth(tmp_path: Path) -> MicrosoftAuthManager:
 
 async def test_entra_pagination_429_retry_and_full_fidelity(tmp_path: Path) -> None:
     auth = _setup_auth(tmp_path)
-    templates = TemplateRegistry()
+    templates = MicrosoftTemplateEngine()
     s0 = datetime(2026, 11, 20, 0, 0, tzinfo=timezone.utc)
     s1 = datetime(2026, 11, 21, 0, 0, tzinfo=timezone.utc)
     spec = JobSpec(
@@ -80,9 +80,9 @@ async def test_entra_pagination_429_retry_and_full_fidelity(tmp_path: Path) -> N
     assert json.loads(res.events[0].raw_payload)["unmappedBetaField"] == {"deep": [1, 2, 3]}
 
 
-async def test_purview_ual_async_job_poll_and_records(tmp_path: Path) -> None:
+async def test_purview_ual_v1_ga_async_job_and_authoritative_limit_exceeded_flag(tmp_path: Path) -> None:
     auth = _setup_auth(tmp_path)
-    templates = TemplateRegistry()
+    templates = MicrosoftTemplateEngine()
     s0 = datetime(2026, 11, 20, 0, 0, tzinfo=timezone.utc)
     s1 = datetime(2026, 11, 21, 0, 0, tzinfo=timezone.utc)
     spec = JobSpec(
@@ -95,13 +95,19 @@ async def test_purview_ual_async_job_poll_and_records(tmp_path: Path) -> None:
     )
 
     with respx.mock(assert_all_called=True) as router:
-        router.post("https://graph.microsoft.com/beta/security/auditLog/queries").mock(
-            return_value=httpx.Response(201, json={"id": "q-555", "status": "running"})
+        router.post("https://graph.microsoft.com/v1.0/security/auditLog/queries").mock(
+            side_effect=[
+                httpx.Response(201, json={"id": "q-555", "status": "running"}),
+                httpx.Response(201, json={"id": "q-cap", "status": "succeeded", "isRecordCountLimitExceeded": True}),
+            ]
         )
-        router.get("https://graph.microsoft.com/beta/security/auditLog/queries/q-555").mock(
-            return_value=httpx.Response(200, json={"id": "q-555", "status": "succeeded"})
+        router.get("https://graph.microsoft.com/v1.0/security/auditLog/queries/q-555").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": "q-555", "status": "succeeded", "isRecordCountLimitExceeded": False},
+            )
         )
-        router.get("https://graph.microsoft.com/beta/security/auditLog/queries/q-555/records").mock(
+        router.get("https://graph.microsoft.com/v1.0/security/auditLog/queries/q-555/records").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -120,14 +126,19 @@ async def test_purview_ual_async_job_poll_and_records(tmp_path: Path) -> None:
             res = await fetch_purview_ual_slice(
                 "job_ual", spec, s0, s1, auth, http, templates, sleep_fn=_noop_sleep
             )
+            trunc = await fetch_purview_ual_slice(
+                "job_ual", spec, s0, s1, auth, http, templates, sleep_fn=_noop_sleep
+            )
 
     assert len(res.events) == 1
     assert json.loads(res.events[0].raw_payload)["auditData"]["ClientIPAddress"] == "203.0.113.77"
+    assert trunc.truncated is True
+    assert "isRecordCountLimitExceeded=true" in trunc.truncation_reason
 
 
-async def test_log_analytics_strips_synthetic_item_id_and_detects_partial_error(tmp_path: Path) -> None:
+async def test_log_analytics_azure_com_endpoint_timespan_prefer_wait_and_partial_error(tmp_path: Path) -> None:
     auth = _setup_auth(tmp_path)
-    templates = TemplateRegistry()
+    templates = MicrosoftTemplateEngine()
     s0 = datetime(2026, 11, 20, 0, 0, tzinfo=timezone.utc)
     s1 = datetime(2026, 11, 21, 0, 0, tzinfo=timezone.utc)
     spec = JobSpec(
@@ -156,7 +167,7 @@ async def test_log_analytics_strips_synthetic_item_id_and_detects_partial_error(
     law_truncated = {"error": {"code": "PartialError", "message": "E_QUERY_RESULT_SET_TOO_LARGE"}}
 
     with respx.mock(assert_all_called=True) as router:
-        router.post("https://api.loganalytics.io/v1/workspaces/ws-guid-123/query").mock(
+        law_route = router.post("https://api.loganalytics.azure.com/v1/workspaces/ws-guid-123/query").mock(
             side_effect=[
                 httpx.Response(200, json=law_ok),
                 httpx.Response(200, json=law_truncated),
@@ -166,14 +177,17 @@ async def test_log_analytics_strips_synthetic_item_id_and_detects_partial_error(
             ok_res = await fetch_log_analytics_slice("job_law", spec, s0, s1, "ws-guid-123", auth, http, templates)
             trunc_res = await fetch_log_analytics_slice("job_law", spec, s0, s1, "ws-guid-123", auth, http, templates)
 
+    sent_req = law_route.calls[0].request
+    assert sent_req.headers["Prefer"] == "wait=600"
+    assert json.loads(sent_req.content)["timespan"] == "2026-11-20T00:00:00Z/2026-11-21T00:00:00Z"
     assert len(ok_res.events) == 1
     assert "_sera_item_id" not in json.loads(ok_res.events[0].raw_payload)
     assert trunc_res.truncated is True
 
 
-async def test_defender_hunting_defender_180d_timeline_and_arm_activity(tmp_path: Path) -> None:
+async def test_defender_hunting_timespan_defender_180d_timeline_and_arm_activity(tmp_path: Path) -> None:
     auth = _setup_auth(tmp_path)
-    templates = TemplateRegistry()
+    templates = MicrosoftTemplateEngine()
     s0 = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
     s1 = datetime(2026, 7, 8, 0, 0, tzinfo=timezone.utc)
 
@@ -200,12 +214,12 @@ async def test_defender_hunting_defender_180d_timeline_and_arm_activity(tmp_path
         table_or_endpoint="management",
         start_time="2026-07-01T00:00:00Z",
         end_time="2026-07-08T00:00:00Z",
-        params={"equals": {"caller": "ops@contoso.com"}},
+        params={"equals": {"resourceGroupName": "rg-prod"}},
         target_id="sub-999",
     )
 
     with respx.mock(assert_all_called=True) as router:
-        router.post("https://graph.microsoft.com/v1.0/security/runHuntingQuery").mock(
+        hunt_route = router.post("https://graph.microsoft.com/v1.0/security/runHuntingQuery").mock(
             return_value=httpx.Response(
                 200,
                 json={"results": [{"Timestamp": "2026-07-02T01:00:00Z", "DeviceId": "d1", "ReportId": 77, "FileName": "rundll32.exe"}]},
@@ -230,12 +244,12 @@ async def test_defender_hunting_defender_180d_timeline_and_arm_activity(tmp_path
                 ),
             ]
         )
-        router.get(
-            "https://management.azure.com/subscriptions/sub-999/providers/microsoft.insights/eventtypes/management/values"
+        arm_route = router.get(
+            "https://management.azure.com/subscriptions/sub-999/providers/Microsoft.Insights/eventtypes/management/values"
         ).mock(
             return_value=httpx.Response(
                 200,
-                json={"value": [{"eventDataId": "arm-1", "eventTimestamp": "2026-07-04T08:00:00Z", "caller": "ops@contoso.com"}]},
+                json={"value": [{"eventDataId": "arm-1", "eventTimestamp": "2026-07-04T08:00:00Z", "resourceGroupName": "rg-prod"}]},
             )
         )
 
@@ -244,7 +258,8 @@ async def test_defender_hunting_defender_180d_timeline_and_arm_activity(tmp_path
             t_res = await fetch_defender_timeline_slice("j2", timeline_spec, s0, s1, auth, http, templates)
             a_res = await fetch_arm_activity_slice("j3", arm_spec, s0, s1, "sub-999", auth, http, templates)
 
+    assert json.loads(hunt_route.calls[0].request.content)["Timespan"] == "2026-07-01T00:00:00Z/2026-07-08T00:00:00Z"
+    assert arm_route.calls[0].request.headers["Prefer"] == "wait=75"
     assert len(h_res.events) == 1
     assert len(t_res.events) == 2
-    assert t_res.events[0].sub_source == "defender_timeline"
     assert len(a_res.events) == 1

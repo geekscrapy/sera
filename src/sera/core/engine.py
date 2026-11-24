@@ -1,4 +1,4 @@
-"""Adaptive per-interval collection engine with ephemeral AES-GCM spooling and slice-level resume."""
+"""Vendor- and sink-agnostic adaptive collection engine with ephemeral AES-GCM spooling."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from sera.core.db import SeraDatabase
 from sera.core.http_client import SeraHttpClient
 from sera.core.models import JobRecord, JobSpec, format_utc_iso, parse_utc_iso
 from sera.core.spool import EphemeralSpoolManager, SpoolBatchHandle, SpoolTamperError
-from sera.core.templates import TemplateRegistry
 from sera.destinations.base import BaseDestinationSink
 from sera.sources.base import BaseSourceConnector
 
@@ -40,20 +39,18 @@ def build_initial_intervals(
 
 
 class CollectionEngine:
-    """Executes SERA collection jobs with adaptive tree bisection and encrypted spool verification."""
+    """Executes SERA collection jobs across any registered source and destination plugins."""
 
     def __init__(
         self,
         config: WorkspaceConfig,
         db: SeraDatabase,
         spool: EphemeralSpoolManager,
-        templates: TemplateRegistry,
         sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.config = config
         self.db = db
         self.spool = spool
-        self.templates = templates
         self._sleep = sleep_fn
 
     def enqueue_job(
@@ -62,8 +59,8 @@ class CollectionEngine:
         connector: BaseSourceConnector,
         sink: BaseDestinationSink,
     ) -> str:
-        """Validate `spec`, create coarse root intervals, and persist the pending job in `sera.sqlite`."""
-        connector.validate_job_spec(spec, self.templates)
+        """Validate `spec` via the source plugin, create coarse root intervals, and persist in `sera.sqlite`."""
+        connector.validate_job_spec(spec)
         start_dt, end_dt = spec.normalized_window()
         chunk_td = (
             timedelta(hours=spec.initial_chunk_hours)
@@ -119,7 +116,6 @@ class CollectionEngine:
                             slice_start=s_dt,
                             slice_end=e_dt,
                             http=http,
-                            templates=self.templates,
                         )
                     except Exception as exc:
                         self.db.mark_slice_failed(job_id, slice_rec.slice_id, str(exc))
@@ -145,7 +141,6 @@ class CollectionEngine:
                         destination_name=sink.dest_config.name,
                     )
 
-                    # Stage all batches in encrypted spool first, then verify & upload each atomically
                     staged_pairs: list[tuple[SpoolBatchHandle, list]] = []
                     for seq, idx in enumerate(range(0, len(to_upload), batch_size)):
                         batch = to_upload[idx : idx + batch_size]
@@ -207,10 +202,8 @@ class CollectionEngine:
         job: JobRecord,
         slice_id: str,
     ) -> None:
-        """Verify encrypted spool chunk and upload to destination, retrying transient sink errors without re-downloading."""
         max_attempts = max(1, self.config.network.max_retries + 1)
         for attempt in range(max_attempts):
-            # Re-verify AES-GCM tag + SHA-256 on EVERY upload attempt!
             ndjson_bytes = self.spool.read_and_verify(handle)
             try:
                 await sink.upload_ndjson_batch(

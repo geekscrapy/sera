@@ -38,7 +38,7 @@ class WorkspaceConfig:
     """Top-level configuration stored in `<workspace>/.sera/config.toml`."""
 
     workspace_uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
-    default_destination: str = "bigquery"
+    default_destination: str = "default"
     batch_size: int = 5000
     network: NetworkConfig = field(default_factory=NetworkConfig)
     destinations: dict[str, DestinationConfig] = field(default_factory=dict)
@@ -140,7 +140,7 @@ def load_workspace_config(workspace_dir: Path) -> WorkspaceConfig:
         opts = {k: v for k, v in dest_raw.items() if k != "type"}
         destinations[dest_name] = DestinationConfig(
             name=dest_name,
-            type=str(dest_raw.get("type", "bigquery")),
+            type=str(dest_raw.get("type", "")),
             options=opts,
         )
 
@@ -151,7 +151,7 @@ def load_workspace_config(workspace_dir: Path) -> WorkspaceConfig:
 
     return WorkspaceConfig(
         workspace_uuid=str(raw.get("workspace_uuid", str(uuid.uuid4()))),
-        default_destination=str(raw.get("default_destination", "bigquery")),
+        default_destination=str(raw.get("default_destination", "default")),
         batch_size=int(raw.get("batch_size", 5000)),
         network=network,
         destinations=destinations,

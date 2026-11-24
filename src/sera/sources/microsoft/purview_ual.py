@@ -17,12 +17,12 @@ from sera.core.models import (
     sha256_hex,
     utc_now_iso,
 )
-from sera.core.templates import TemplateRegistry, TemplateValidationError
 from sera.sources.microsoft.auth import MicrosoftAuthManager, SCOPE_GRAPH
+from sera.sources.microsoft.templates import MicrosoftTemplateEngine, TemplateValidationError
 
 
 PURVIEW_ENDPOINTS = frozenset({"auditLogRecords", "ual"})
-DEFAULT_PURVIEW_BASE = "https://graph.microsoft.com/beta/security/auditLog/queries"
+DEFAULT_PURVIEW_BASE = "https://graph.microsoft.com/v1.0/security/auditLog/queries"
 
 
 def validate_purview_endpoint(endpoint: str) -> str:
@@ -40,7 +40,7 @@ async def fetch_purview_ual_slice(
     slice_end: datetime,
     auth: MicrosoftAuthManager,
     http: SeraHttpClient,
-    templates: TemplateRegistry,
+    templates: MicrosoftTemplateEngine,
     *,
     base_url: str = DEFAULT_PURVIEW_BASE,
     poll_interval_seconds: float = 2.0,
@@ -54,6 +54,7 @@ async def fetch_purview_ual_slice(
     end_iso = format_utc_iso(slice_end)
 
     create_body: dict[str, Any] = {
+        "@odata.type": "#microsoft.graph.security.auditLogQuery",
         "displayName": f"SERA-{job_id}-{start_iso}",
         "filterStartDateTime": start_iso,
         "filterEndDateTime": end_iso,
@@ -75,6 +76,7 @@ async def fetch_purview_ual_slice(
         raise RuntimeError(f"Purview UAL query creation did not return an 'id': {created}")
 
     status_url = f"{base_url}/{query_id}"
+    final_query_obj = created
     status = str(created.get("status", "")).lower()
     polls = 0
     while status not in {"succeeded", "completed"}:
@@ -84,13 +86,24 @@ async def fetch_purview_ual_slice(
         if polls > max_polls:
             raise TimeoutError(f"Purview UAL async query '{query_id}' timed out after {max_polls} polls")
         await sleep_fn(poll_interval_seconds)
-        poll_resp = await http.request_json(
+        final_query_obj = await http.request_json(
             "GET",
             status_url,
             headers=headers,
             refresh_headers_on_401=refresh_cb,
         )
-        status = str(poll_resp.get("status", "")).lower()
+        status = str(final_query_obj.get("status", "")).lower()
+
+    # Authoritative truncation check documented in Microsoft Graph v1.0 `auditLogQuery`:
+    if bool(final_query_obj.get("isRecordCountLimitExceeded")):
+        return SliceResult(
+            events=[],
+            truncated=True,
+            truncation_reason=(
+                f"Purview UAL query '{query_id}' reported isRecordCountLimitExceeded=true "
+                f"(recordCountLimit={final_query_obj.get('recordCountLimit')})"
+            ),
+        )
 
     events: list[RawEventEnvelope] = []
     next_url: str | None = f"{status_url}/records"

@@ -57,8 +57,8 @@ async def test_live_ms_arm_activity_api_contract() -> None:
     async with SeraHttpClient(cfg.network) as http:
         resp = await http.request_json(
             "GET",
-            f"https://management.azure.com/subscriptions/{sub_id}/providers/microsoft.insights/eventtypes/management/values",
-            headers=headers,
+            f"https://management.azure.com/subscriptions/{sub_id}/providers/Microsoft.Insights/eventtypes/management/values",
+            headers={**headers, "Prefer": "wait=75"},
             params={
                 "api-version": ARM_API_VERSION,
                 "$filter": f"eventTimestamp ge '{start}' and eventTimestamp le '{end}'",
