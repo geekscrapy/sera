@@ -69,16 +69,19 @@ def test_plugin_packager_produces_self_contained_local_uvx_plugin(tmp_path: Path
     mcp_raw = (dist_latest / "mcp_config.json").read_text(encoding="utf-8")
     assert "github.com" not in mcp_raw
     assert str(tmp_path) not in mcp_raw
+    assert "PYTHONDONTWRITEBYTECODE" not in mcp_raw
     mcp_cfg = json.loads(mcp_raw)
-    assert mcp_cfg["mcpServers"]["sera"]["command"] == "uvx"
-    assert mcp_cfg["mcpServers"]["sera"]["args"] == [
-        "--quiet",
-        "--with-requirements",
-        "${PLUGIN_ROOT}/scripts/sera_mcp.py",
-        "python",
-        "-B",
-        "${PLUGIN_ROOT}/scripts/sera_mcp.py",
-    ]
+    assert mcp_cfg["mcpServers"]["sera"] == {
+        "command": "uvx",
+        "args": [
+            "--quiet",
+            "--with-requirements",
+            "${PLUGIN_ROOT}/scripts/sera_mcp.py",
+            "python",
+            "-B",
+            "${PLUGIN_ROOT}/scripts/sera_mcp.py",
+        ],
+    }
 
     # Verify bundled local scripts and source package exist inside dist-latest
     mcp_script = dist_latest / "scripts" / "sera_mcp.py"

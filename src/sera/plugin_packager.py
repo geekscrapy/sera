@@ -298,9 +298,6 @@ def build_plugin_release(
                     "-B",
                     "${PLUGIN_ROOT}/scripts/sera_mcp.py",
                 ],
-                "env": {
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                },
             }
         }
     }
