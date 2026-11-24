@@ -79,6 +79,8 @@ class _FakeLoadJob:
 
 
 class _FakeBQClient:
+    project = "adc-env-project"
+
     def __init__(self) -> None:
         self.created_datasets: list[Any] = []
         self.created_tables: list[Any] = []
@@ -100,13 +102,12 @@ async def test_customizable_bigquery_jsonl_and_http_destinations(tmp_path: Path)
     ndjson_bytes = (json.dumps(ev.to_destination_row()) + "\n").encode("utf-8")
     job = _sample_job_record()
 
-    # 1. Customizable BigQuery destination (custom table names, location, clustering)
+    # 1. BigQuery destination (auto-selects project & auth via ADC/env; customizable dataset/table/clustering)
     fake_bq = _FakeBQClient()
     bq_cfg = DestinationConfig(
         name="custom_bq",
         type="bigquery",
         options={
-            "project_id": "case-alpha",
             "dataset_id": "forensics",
             "events_table": "raw_events",
             "jobs_table": "audit_runs",
@@ -115,12 +116,12 @@ async def test_customizable_bigquery_jsonl_and_http_destinations(tmp_path: Path)
         },
     )
     bq_sink = BigQueryDestination(bq_cfg, NetworkConfig(), client_factory=lambda: fake_bq)
-    assert bq_sink.describe_target() == "case-alpha.forensics.raw_events"
+    assert bq_sink.describe_target() == "adc-env-project.forensics.raw_events"
     await bq_sink.upload_ndjson_batch(ndjson_bytes, 1, job, "slice_1")
     await bq_sink.record_job_summary(job)
     assert len(fake_bq.created_tables) == 2
-    assert fake_bq.loads[0][0] == "case-alpha.forensics.raw_events"
-    assert fake_bq.loads[1][0] == "case-alpha.forensics.audit_runs"
+    assert fake_bq.loads[0][0] == "adc-env-project.forensics.raw_events"
+    assert fake_bq.loads[1][0] == "adc-env-project.forensics.audit_runs"
 
     # 2. Customizable JSONL directory destination
     jsonl_dir = tmp_path / "mounted_case_share"

@@ -1,4 +1,4 @@
-"""Integration & contract diagnostic tests for Google Cloud BigQuery SDK & Batch Load API."""
+"""Integration & contract diagnostic tests for Google Cloud BigQuery SDK & Batch Load API (ADC + env project)."""
 
 from __future__ import annotations
 
@@ -13,8 +13,13 @@ from sera.core.models import JobRecord, JobStatus, RawEventEnvelope, canonical_r
 from sera.destinations.bigquery import BigQueryDestination, EVENTS_SCHEMA, JOBS_SCHEMA
 
 
-def test_bigquery_sdk_schema_and_load_job_config_contract() -> None:
-    """Validate `google-cloud-bigquery` SDK field types, JSON column support, partitioning, and clustering."""
+def test_bigquery_sdk_schema_and_adc_option_specs_contract() -> None:
+    """Validate BigQuery schema types and confirm zero project/credential options are required."""
+    spec_names = {s.name: s.required for s in BigQueryDestination.option_specs()}
+    assert "project_id" not in spec_names
+    assert "credentials_file" not in spec_names
+    assert all(req is False for req in spec_names.values())
+
     field_map = {f.name: (f.field_type, f.mode) for f in EVENTS_SCHEMA}
     assert field_map["event_id"] == ("STRING", "REQUIRED")
     assert field_map["job_id"] == ("STRING", "REQUIRED")
@@ -25,7 +30,7 @@ def test_bigquery_sdk_schema_and_load_job_config_contract() -> None:
     jobs_map = {f.name: (f.field_type, f.mode) for f in JOBS_SCHEMA}
     assert jobs_map["events_uploaded"] == ("INT64", "REQUIRED")
 
-    table = bigquery.Table("case-proj.sera_raw.events", schema=list(EVENTS_SCHEMA))
+    table = bigquery.Table("adc-proj.sera_raw.events", schema=list(EVENTS_SCHEMA))
     table.time_partitioning = bigquery.TimePartitioning(
         type_=bigquery.TimePartitioningType.DAY,
         field="event_timestamp",
@@ -39,18 +44,17 @@ def test_bigquery_sdk_schema_and_load_job_config_contract() -> None:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("SERA_ITEST_BQ_PROJECT"),
-    reason="Set SERA_ITEST_BQ_PROJECT=<gcp_case_project> to run live BigQuery Batch Load diagnostic",
+    os.environ.get("SERA_ITEST_ENABLE_BQ") != "1",
+    reason="Set SERA_ITEST_ENABLE_BQ=1 (with ambient ADC + GCP project env vars) to run live BigQuery diagnostic",
 )
 async def test_live_bigquery_batch_load_roundtrip_contract() -> None:
-    project_id = os.environ["SERA_ITEST_BQ_PROJECT"].strip()
     dataset_id = os.environ.get("SERA_ITEST_BQ_DATASET", "sera_itest_diag").strip()
 
     sink = BigQueryDestination(
         DestinationConfig(
             name="itest_bq",
             type="bigquery",
-            options={"project_id": project_id, "dataset_id": dataset_id},
+            options={"dataset_id": dataset_id},
         ),
         NetworkConfig(),
     )
@@ -73,7 +77,7 @@ async def test_live_bigquery_batch_load_roundtrip_contract() -> None:
         source="microsoft",
         sub_source="entra",
         table_or_endpoint="signIns",
-        template="all",
+        template="canonical",
         params={},
         profile="default",
         target_id="",

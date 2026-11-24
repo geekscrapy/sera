@@ -44,15 +44,15 @@ description: >-
 > **Communication Rule:** Whenever the user asks what SERA does, how its workflow operates, or how to get started, give them a **short, high-level summary** and guide them step-by-step from their current state. **Do NOT overwhelm the user** with internal template schemas, JSON parameter structures, encryption internals, or SQLite mechanics unless they explicitly ask for deep technical details—keep all of Section 2 as your internal agent knowledge.
 
 ### What to Tell the User (Summary View)
-**SERA (Secure Extraction for Response Agents)** is a forensic log extraction engine that downloads **100% full, unsummarized events** from external telemetry sources and uploads them directly into your engagement's destination (such as your GCP `CASE` BigQuery project) without passing raw logs through LLM context or allowing post-download tampering.
+**SERA (Secure Extraction for Response Agents)** is a forensic log extraction engine that downloads **100% full, unsummarized events** from external telemetry sources and uploads them directly into your engagement's destination (such as BigQuery—which automatically uses your ambient GCP Application Default Credentials and environment project) without passing raw logs through LLM context or allowing post-download tampering.
 
 ### How to Guide the User Through SERA's 4-Stage Workflow
 Before instructing the user, silently call `list_sources` and `list_destinations` (if `.sera/` is already initialized) to see which stage they are on, then walk them cleanly through the next step:
 
 1. **Init Setup (`sera init`) — *One-time per engagement workspace***
    - Initializes `<workspace>/.sera/` (isolated config + SQLite ledger + upfront `uv` dependency check across all discovered source and destination plugins).
-   - Give the user a ready-to-run command tailored to their target destination plugin, e.g.:
-     `sera init --dest-type bigquery --dest-opt project_id=<CASE_GCP_PROJECT> --dest-opt dataset_id=sera_raw`
+   - For BigQuery, GCP auth and target project come automatically from ADC and environment variables—no project ID flags needed:
+     `sera init --dest-type bigquery`
 2. **Auth (`sera auth add <source> ...`) — *Out-of-band in terminal (secrets never enter chat)***
    - Guides the analyst to authenticate directly into `<workspace>/.sera/creds/` using any discovered source plugin:
      - Microsoft OAuth (App Registration secret/cert, Device-Code, or Browser):
@@ -115,7 +115,7 @@ Each `sub_source` uses **one canonical full-event query template** (`params={}` 
 Field names are validated identifiers (`^[A-Za-z_][A-Za-z0-9_./-]*$`) and values are safely literal-encoded per dialect—never pass raw SQL/KQL operators (`| project`, `| summarize`, `$select`).
 
 ### Customizing Destinations (`sera init` / `sera destination add`)
-- **BigQuery (`type="bigquery"`)**: Options `project_id`, `dataset_id` (`sera_raw`), `events_table` (`events`), `jobs_table` (`collection_jobs`), `location` (`US`), `partition_field` (`event_timestamp`), `cluster_fields` (`["source", "sub_source", "table_or_endpoint"]`), optional `credentials_file`.
+- **BigQuery (`type="bigquery"`)**: Uses ambient GCP ADC and environment variables for auth and project selection automatically. Optional overrides: `dataset_id` (`sera_raw`), `events_table` (`events`), `jobs_table` (`collection_jobs`), `location`, `partition_field` (`event_timestamp`), `cluster_fields` (`["source", "sub_source", "table_or_endpoint"]`).
 - **External JSONL Directory (`type="jsonl"`)**: Options `output_dir`, `events_subdir` (`events`), `jobs_filename` (`collection_jobs.jsonl`).
 - **HTTP / SIEM HEC (`type="http"`)**: Options `url`, `format` (`ndjson` | `json_array` | `splunk_hec`), `bearer_token` / `hec_token`, `headers`.
 """

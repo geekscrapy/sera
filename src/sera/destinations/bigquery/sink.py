@@ -1,15 +1,14 @@
-"""Self-contained Google BigQuery destination sink plugin."""
+"""Self-contained Google BigQuery destination sink plugin (uses ambient ADC & env project)."""
 
 from __future__ import annotations
 
 import asyncio
 import io
 import json
-from pathlib import Path
+import os
 from typing import Any, Callable
 
 from google.cloud import bigquery
-from google.oauth2 import service_account
 
 from sera.config import DestinationConfig, NetworkConfig
 from sera.core.models import JobRecord, utc_now_iso
@@ -53,7 +52,7 @@ JOBS_SCHEMA: tuple[bigquery.SchemaField, ...] = (
 
 
 class BigQueryDestination(BaseDestinationSink):
-    """Self-contained BigQuery destination plugin using atomic Batch Load jobs."""
+    """Self-contained BigQuery destination plugin relying entirely on ADC and ambient GCP project env vars."""
 
     sink_type = "bigquery"
     required_packages = ("google-cloud-bigquery>=3.20.0",)
@@ -61,11 +60,10 @@ class BigQueryDestination(BaseDestinationSink):
     @classmethod
     def option_specs(cls) -> tuple[SinkOptionSpec, ...]:
         return (
-            SinkOptionSpec("project_id", "GCP CASE project_id", required=True),
             SinkOptionSpec("dataset_id", "BigQuery dataset_id", required=False, default="sera_raw"),
             SinkOptionSpec("events_table", "Events table name", required=False, default="events"),
             SinkOptionSpec("jobs_table", "Collection jobs manifest table", required=False, default="collection_jobs"),
-            SinkOptionSpec("location", "BigQuery dataset location", required=False, default="US"),
+            SinkOptionSpec("location", "Optional BigQuery dataset location (e.g. US, EU)", required=False, default=""),
             SinkOptionSpec("partition_field", "DAY time-partition column", required=False, default="event_timestamp"),
             SinkOptionSpec(
                 "cluster_fields",
@@ -73,7 +71,6 @@ class BigQueryDestination(BaseDestinationSink):
                 required=False,
                 default=["source", "sub_source", "table_or_endpoint"],
             ),
-            SinkOptionSpec("credentials_file", "Optional Service Account JSON path", required=False, default=""),
         )
 
     def __init__(
@@ -84,23 +81,16 @@ class BigQueryDestination(BaseDestinationSink):
     ) -> None:
         super().__init__(dest_config, network)
         opts = self.apply_defaults(dest_config.options)
-        self.project_id = str(opts.get("project_id", "")).strip()
         self.dataset_id = str(opts.get("dataset_id", "sera_raw")).strip()
         self.events_table = str(opts.get("events_table", "events")).strip()
         self.jobs_table = str(opts.get("jobs_table", "collection_jobs")).strip()
-        self.location = str(opts.get("location", "US")).strip()
+        self.location = str(opts.get("location", "")).strip()
         self.partition_field = str(opts.get("partition_field", "event_timestamp")).strip()
         raw_clusters = opts.get("cluster_fields", ["source", "sub_source", "table_or_endpoint"])
         self.cluster_fields = [str(c) for c in raw_clusters] if isinstance(raw_clusters, list) else []
-        self.credentials_file = str(opts.get("credentials_file", "")).strip()
         self._client_factory = client_factory
         self._client: bigquery.Client | None = None
         self._ready = False
-
-        if not self.project_id:
-            raise ValueError(
-                f"BigQuery destination '{dest_config.name}' requires a non-empty 'project_id' in .sera/config.toml"
-            )
 
     def _get_client(self) -> bigquery.Client:
         if self._client is not None:
@@ -108,24 +98,31 @@ class BigQueryDestination(BaseDestinationSink):
         if self._client_factory is not None:
             self._client = self._client_factory()
             return self._client
-        creds = None
-        if self.credentials_file:
-            cred_path = Path(self.credentials_file).expanduser()
-            creds = service_account.Credentials.from_service_account_file(str(cred_path))
-        self._client = bigquery.Client(
-            project=self.project_id,
-            credentials=creds,
-            location=self.location or None,
-        )
+        # Relies strictly on Application Default Credentials (ADC) and ambient GCP project env vars
+        self._client = bigquery.Client(location=self.location or None)
         return self._client
+
+    def _project_prefix(self) -> str:
+        if self._client is None and self._client_factory is None:
+            for env_var in ("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT"):
+                env_proj = os.environ.get(env_var, "").strip()
+                if env_proj:
+                    return f"{env_proj}."
+        try:
+            proj = str(self._get_client().project or "").strip()
+            if proj:
+                return f"{proj}."
+        except Exception:
+            pass
+        return ""
 
     @property
     def events_table_fqn(self) -> str:
-        return f"{self.project_id}.{self.dataset_id}.{self.events_table}"
+        return f"{self._project_prefix()}{self.dataset_id}.{self.events_table}"
 
     @property
     def jobs_table_fqn(self) -> str:
-        return f"{self.project_id}.{self.dataset_id}.{self.jobs_table}"
+        return f"{self._project_prefix()}{self.dataset_id}.{self.jobs_table}"
 
     def describe_target(self) -> str:
         return self.events_table_fqn
@@ -137,14 +134,13 @@ class BigQueryDestination(BaseDestinationSink):
         return {
             "name": self.dest_config.name,
             "type": self.sink_type,
-            "project_id": self.project_id,
+            "auth": "adc_and_env",
             "dataset_id": self.dataset_id,
             "events_table": self.events_table,
             "jobs_table": self.jobs_table,
-            "location": self.location,
+            "location": self.location or "default",
             "partition_field": self.partition_field,
             "cluster_fields": self.cluster_fields,
-            "uses_credentials_file": bool(self.credentials_file),
             "lookup_example": self.format_lookup_hint("<job_id>"),
         }
 
@@ -152,12 +148,13 @@ class BigQueryDestination(BaseDestinationSink):
         if self._ready:
             return
         client = self._get_client()
-        dataset_ref = bigquery.Dataset(f"{self.project_id}.{self.dataset_id}")
+        dataset_fqn = f"{client.project}.{self.dataset_id}"
+        dataset_ref = bigquery.Dataset(dataset_fqn)
         if self.location:
             dataset_ref.location = self.location
         client.create_dataset(dataset_ref, exists_ok=True)
 
-        ev_table = bigquery.Table(self.events_table_fqn, schema=list(EVENTS_SCHEMA))
+        ev_table = bigquery.Table(f"{dataset_fqn}.{self.events_table}", schema=list(EVENTS_SCHEMA))
         if self.partition_field:
             ev_table.time_partitioning = bigquery.TimePartitioning(
                 type_=bigquery.TimePartitioningType.DAY,
@@ -167,7 +164,7 @@ class BigQueryDestination(BaseDestinationSink):
             ev_table.clustering_fields = self.cluster_fields[:4]
         client.create_table(ev_table, exists_ok=True)
 
-        jb_table = bigquery.Table(self.jobs_table_fqn, schema=list(JOBS_SCHEMA))
+        jb_table = bigquery.Table(f"{dataset_fqn}.{self.jobs_table}", schema=list(JOBS_SCHEMA))
         client.create_table(jb_table, exists_ok=True)
         self._ready = True
 
@@ -176,6 +173,7 @@ class BigQueryDestination(BaseDestinationSink):
 
     def _upload_sync(self, ndjson_bytes: bytes) -> None:
         client = self._get_client()
+        table_fqn = f"{client.project}.{self.dataset_id}.{self.events_table}"
         job_cfg = bigquery.LoadJobConfig(
             schema=list(EVENTS_SCHEMA),
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
@@ -183,7 +181,7 @@ class BigQueryDestination(BaseDestinationSink):
         )
         load_job = client.load_table_from_file(
             io.BytesIO(ndjson_bytes),
-            self.events_table_fqn,
+            table_fqn,
             job_config=job_cfg,
             location=self.location or None,
         )
@@ -205,6 +203,7 @@ class BigQueryDestination(BaseDestinationSink):
 
     def _record_job_sync(self, job: JobRecord) -> None:
         client = self._get_client()
+        table_fqn = f"{client.project}.{self.dataset_id}.{self.jobs_table}"
         row = {
             "job_id": job.job_id,
             "recorded_at": utc_now_iso(),
@@ -234,7 +233,7 @@ class BigQueryDestination(BaseDestinationSink):
         )
         load_job = client.load_table_from_file(
             io.BytesIO(payload),
-            self.jobs_table_fqn,
+            table_fqn,
             job_config=job_cfg,
             location=self.location or None,
         )
